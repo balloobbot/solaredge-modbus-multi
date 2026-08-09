@@ -314,23 +314,40 @@ somewhere to land.
 ### 3.9 No writable bitfield
 
 `E_Lim_Ctl_Mode` is one register holding five independent settings, exposed as
-three entities. Each write is a read-modify-write of the whole word against the
-value from the last poll, and there is no field-level way to express it — so the
-same bit arithmetic is written out in each of the three entities, and the value
-written back is up to a full poll interval stale.
+three entities — a select over the three mutually exclusive mode bits, and two
+switches over the independent flags. Changing any of them means writing all
+five back, and there is no field-level way to express that.
 
-`ModbusUnit.mask_write_register` (FC 0x16) would make this atomic at the device,
+`ModbusUnit.mask_write_register` (FC 0x16) would make it atomic at the device,
 but **SolarEdge does not implement it**: its *SunSpec Implementation Technical
 Note* (v3.2, June 2025), Appendix A, documents the main functions as `0x03`,
 `0x06` and `0x10` only, and this integration has never issued anything but
-`0x03` and `0x10`. So the race is inherent here.
+`0x03` and `0x10`. So the read-modify-write is unavoidable here.
 
-That is an argument for the library owning the read-modify-write rather than
-against it: a `write()` on a bit field could re-read the register immediately
-before writing, narrowing the window from one poll interval to one round trip —
-better than any consumer can do for itself — and could still prefer FC 0x16 on
-devices that do implement it. Packed mode words are common enough across
-inverters that a writable `bit`/`bits` field type would earn its place.
+What that changes is *where* it belongs. Doing it in the entities means writing
+back the value from the last poll, up to a full scan interval stale — anything
+that touched another bit meanwhile is silently reverted. So this branch puts it
+on the component instead:
+
+```python
+async def write_mode_bits(self, mask: int, value: int) -> None:
+    """Replace the bits in ``mask`` with ``value``, leaving the rest alone."""
+    await self.async_update(notify=False)
+    current = self.e_lim_ctl_mode
+    ...
+    await self.write("e_lim_ctl_mode", (int(current) & ~mask) | (value & mask))
+```
+
+Re-reading in the write narrows the window from one poll interval to one round
+trip, which is as tight as this device allows — and a caller working from a
+polled attribute has already lost the chance to do it. The select and both
+switches now pass a mask and a value and hold no bit arithmetic of their own.
+
+That helper is deliberately shaped like what the library should offer: a
+writable `bit` / `bits` field type whose `write()` re-reads first, and prefers
+FC 0x16 on devices that do implement it. Packed mode words are common enough
+across inverters that it would earn its place —
+[home-assistant-libs/modbus-connection#150](https://github.com/home-assistant-libs/modbus-connection/issues/150).
 
 ### 3.10 Smaller things
 

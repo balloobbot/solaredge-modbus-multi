@@ -8,12 +8,12 @@ from typing import Any
 from homeassistant.components.switch import SwitchEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
-from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN
+from .solaredge import SiteLimit
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -82,16 +82,15 @@ class SolarEdgeSwitchBase(CoordinatorEntity, SwitchEntity):
 class SolarEdgeLimitControlModeBit(SolarEdgeSwitchBase):
     """One bit of the site limit control mode word.
 
-    The mode register packs several independent options into one 16-bit word,
-    so flipping one of them is a read-modify-write of the whole register. The
-    value written is the one from the last poll, which is the best available:
-    Modbus has no compare-and-swap, and the alternative — a mask write — is a
-    function code SolarEdge does not implement here.
+    That register packs five independent options, so flipping one is a
+    read-modify-write of the whole word. The component owns that, because it is
+    the only place that can re-read the register immediately before writing it
+    instead of reusing the last polled value.
     """
 
     entity_category = EntityCategory.CONFIG
 
-    _bit: int
+    _mask: int
 
     @property
     def _mode(self) -> int | None:
@@ -104,22 +103,12 @@ class SolarEdgeLimitControlModeBit(SolarEdgeSwitchBase):
 
     @property
     def is_on(self) -> bool:
-        return bool((int(self._mode) >> self._bit) & 1)
+        return bool(int(self._mode) & self._mask)
 
     async def _async_set_bit(self, on: bool) -> None:
-        mode = self._mode
-        if mode is None:
-            raise HomeAssistantError(
-                f"{self.unique_id}: site limit control mode is unknown."
-            )
+        _LOGGER.debug(f"set {self.unique_id} mask {self._mask:#06x} to {int(on)}")
 
-        set_bits = int(mode) | (1 << self._bit) if on else int(mode) & ~(1 << self._bit)
-
-        _LOGGER.debug(f"set {self.unique_id} bits {set_bits:016b}")
-
-        await self._platform.async_write(
-            self._platform.site_limit, "e_lim_ctl_mode", set_bits
-        )
+        await self._platform.async_write_mode_bits(self._mask, self._mask if on else 0)
         await self.async_update()
 
     async def async_turn_on(self, **kwargs: Any) -> None:
@@ -134,7 +123,7 @@ class SolarEdgeLimitControlModeBit(SolarEdgeSwitchBase):
 class SolarEdgeExternalProduction(SolarEdgeLimitControlModeBit):
     """External Production switch. Indicates a non-SolarEdge power sorce in system."""
 
-    _bit = 10
+    _mask = SiteLimit.EXTERNAL_PRODUCTION_BIT
 
     @property
     def unique_id(self) -> str:
@@ -152,7 +141,7 @@ class SolarEdgeExternalProduction(SolarEdgeLimitControlModeBit):
 class SolarEdgeNegativeSiteLimit(SolarEdgeLimitControlModeBit):
     """Negative Site Limit switch. Sets minimum import power when enabled."""
 
-    _bit = 11
+    _mask = SiteLimit.NEGATIVE_LIMIT_BIT
 
     @property
     def unique_id(self) -> str:

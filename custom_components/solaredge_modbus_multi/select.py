@@ -5,7 +5,6 @@ import logging
 from homeassistant.components.select import SelectEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
-from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
@@ -19,6 +18,7 @@ from .const import (
     STORAGE_CONTROL_MODE,
     STORAGE_MODE,
 )
+from .solaredge import SiteLimit
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -259,25 +259,13 @@ class SolaredgeLimitControlMode(SolarEdgeSelectBase):
         return self._options[None]
 
     async def async_select_option(self, option: str) -> None:
-        mode = self._mode
-        if mode is None:
-            raise HomeAssistantError(
-                f"{self.unique_id}: site limit control mode is unknown."
-            )
-
-        set_bits = int(mode)
         new_mode = get_key(self._options, option)
+        # The three modes are mutually exclusive: selecting one clears the
+        # other two, and "none" clears all three.
+        value = 0 if new_mode is None else 1 << int(new_mode)
 
-        for bit in (0, 1, 2):
-            set_bits = set_bits & ~(1 << bit)
-
-        if new_mode is not None:
-            set_bits = set_bits | (1 << int(new_mode))
-
-        _LOGGER.debug(f"set {self.unique_id} bits {set_bits:016b}")
-        await self._platform.async_write(
-            self._platform.site_limit, "e_lim_ctl_mode", set_bits
-        )
+        _LOGGER.debug(f"set {self.unique_id} to bit {new_mode}")
+        await self._platform.async_write_mode_bits(SiteLimit.LIMIT_MODE_BITS, value)
         await self.async_update()
 
 

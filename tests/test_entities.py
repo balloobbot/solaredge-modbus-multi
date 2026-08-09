@@ -102,6 +102,10 @@ class StubHub:
         self.writes.append((type(component).__name__, field, value))
         await component.write(field, value)
 
+    async def async_write_mode_bits(self, component, mask, value):
+        self.writes.append((type(component).__name__, f"bits {mask:#06x}", value))
+        await component.write_mode_bits(mask, value)
+
 
 async def _build_hub(unit, **options) -> StubHub:
     """Discover a seeded unit and wrap it the way the real hub does."""
@@ -297,3 +301,50 @@ async def test_diagnostics_carry_decoded_values_and_raw_registers(
 
     # Serial numbers are redacted; the values that identify a fault are not.
     assert data["meter_id_1"]["common"]["sn"] == "**REDACTED**"
+
+
+async def test_a_mode_bit_write_rereads_first(mock_modbus_unit) -> None:
+    """A change made since the last poll survives flipping another bit.
+
+    The register packs five settings and SolarEdge serves no atomic mask
+    write, so setting one is a read-modify-write. Doing it on the component
+    means re-reading here rather than writing back the value from the last
+    poll — which is the difference between losing a concurrent change and
+    keeping it.
+    """
+    seed_inverter(mock_modbus_unit)
+    mock_modbus_unit.holding[57344] = [0b0000_1000_0000_0000, 0]  # bit 11 set
+
+    hub = await _build_hub(mock_modbus_unit, site_limit_control=True)
+    entities = await _entities_for(hub, switch)
+    uid = hub.inverters[0].uid_base
+    external = next(e for e in entities if e.unique_id == f"{uid}_external_production")
+
+    # Something else — the installer app, the inverter itself — sets bit 0
+    # after our last poll. Home Assistant's cached copy does not have it.
+    mock_modbus_unit.holding[57344] = 0b0000_1000_0000_0001
+    assert hub.inverters[0].site_limit.e_lim_ctl_mode == 0b0000_1000_0000_0000
+
+    await external._async_set_bit(True)
+
+    written = (await mock_modbus_unit.read_holding_registers(57344, 1))[0]
+    assert written == 0b0000_1100_0000_0001  # bit 10 added, bits 0 and 11 kept
+
+
+async def test_selecting_a_limit_mode_clears_only_its_own_group(
+    mock_modbus_unit,
+) -> None:
+    seed_inverter(mock_modbus_unit)
+    # Limit mode bit 1, plus both independent flags.
+    mock_modbus_unit.holding[57344] = [0b0000_1100_0000_0010, 0]
+
+    hub = await _build_hub(mock_modbus_unit, site_limit_control=True)
+    entities = await _entities_for(hub, select)
+    uid = hub.inverters[0].uid_base
+    mode = next(e for e in entities if e.unique_id == f"{uid}_limit_control_mode")
+
+    await mode.async_select_option("Production Control")  # bit 2
+
+    written = (await mock_modbus_unit.read_holding_registers(57344, 1))[0]
+    # Bit 1 replaced by bit 2; bits 10 and 11 untouched.
+    assert written == 0b0000_1100_0000_0100

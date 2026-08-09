@@ -43,14 +43,45 @@ def _f32(address: int, **kwargs: Any) -> FloatField:
 class SiteLimit(Component):
     """Export/site limitation control (0xE000)."""
 
+    LIMIT_MODE_BITS: Final = 0b111
+    """Bits 0-2: which quantity is limited. Mutually exclusive; none is off."""
+
+    EXTERNAL_PRODUCTION_BIT: Final = 1 << 10
+    """Bit 10: a non-SolarEdge power source is present on the site."""
+
+    NEGATIVE_LIMIT_BIT: Final = 1 << 11
+    """Bit 11: the limit is a minimum import rather than a maximum export."""
+
     e_lim_ctl_mode = integer(0, signed=False, writable=True)
-    """Limit control mode: which quantity the site limit applies to."""
+    """Limit control mode: five independent settings packed into one register."""
 
     e_lim_ctl = integer(1, signed=False, writable=True)
     """Limit control: which meter/connection the limit is measured at."""
 
     e_site_limit = _f32(2, writable=True)
     """The site limit itself, in the unit selected by the mode."""
+
+    async def write_mode_bits(self, mask: int, value: int) -> None:
+        """Replace the bits in ``mask`` with ``value``, leaving the rest alone.
+
+        ``e_lim_ctl_mode`` packs five independent settings, each its own entity,
+        so changing one means writing all five back. SolarEdge does not serve
+        FC 0x16 (mask write), and Modbus has no compare-and-swap, so this is a
+        read-modify-write and cannot be made atomic.
+
+        What it can do is read the register **here**, rather than reusing the
+        value from the last poll: that narrows the window in which something
+        else could change another bit from a whole poll interval to one round
+        trip. Keeping it on the component is what makes that possible — a
+        caller working from a polled attribute has already lost the chance.
+
+        Raises ``ValueError`` if the inverter does not report the mode.
+        """
+        await self.async_update(notify=False)
+        current = self.e_lim_ctl_mode
+        if current is None:
+            raise ValueError("the inverter did not report its limit control mode")
+        await self.write("e_lim_ctl_mode", (int(current) & ~mask) | (value & mask))
 
 
 class ExternalProductionMax(Component):
