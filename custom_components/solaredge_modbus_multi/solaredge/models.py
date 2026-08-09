@@ -155,7 +155,9 @@ class Inverter(SunSpecComponent):
     va_sf = sunssf(19)
     """Apparent power scale factor."""
 
-    v_ar = int16(20, scale_register=21, unit="var")
+    # Named ``var`` rather than the generator's ``v_ar`` so the inverter and
+    # the meter agree; the entity layer reads the same field name on both.
+    var = int16(20, scale_register=21, unit="var")
     """AC reactive power."""
 
     var_sf = sunssf(21)

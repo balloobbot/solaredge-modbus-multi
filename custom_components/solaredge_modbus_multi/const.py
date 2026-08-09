@@ -14,9 +14,6 @@ SETUP_SCAN_FAST = "scan_fast"  # Scan IDs 1-32
 SETUP_SCAN_FULL = "scan_full"  # Scan IDs 1-247
 SETUP_MANUAL = "manual_list"
 
-# raise a startup exception if pymodbus version is less than this
-PYMODBUS_REQUIRED_VERSION = "3.8.3"
-
 # units missing in homeassistant core
 ENERGY_VOLT_AMPERE_HOUR: Final = "VAh"
 ENERGY_VOLT_AMPERE_REACTIVE_HOUR: Final = "varh"
@@ -44,26 +41,6 @@ STATUS_VENDOR4_VERSION = "3.20.0"  # solaredge firmware version
 INVERTED_POWER_VERSION = "2026.2.0"  # home assistant core version
 
 
-class ModbusExceptions:
-    """An enumeration of the valid modbus exceptions."""
-
-    """
-        Copied from pymodbus source:
-        https://github.com/pymodbus-dev/pymodbus/blob/a1c14c7a8fbea52618ba1cbc9933c1dd24c3339d/pymodbus/pdu/pdu.py#L72
-    """
-
-    IllegalFunction = 0x01
-    IllegalAddress = 0x02
-    IllegalValue = 0x03
-    DeviceFailure = 0x04
-    Acknowledge = 0x05
-    DeviceBusy = 0x06
-    NegativeAcknowledge = 0x07
-    MemoryParityError = 0x08
-    GatewayPathUnavailable = 0x0A
-    GatewayNoResponse = 0x0B
-
-
 class RetrySettings(IntEnum):
     """Retry settings when opening a connection to the inverter fails."""
 
@@ -73,22 +50,9 @@ class RetrySettings(IntEnum):
 
 
 class ModbusDefaults(IntEnum):
-    """Values to pass to pymodbus"""
-
-    """
-        ReconnectDelay doubles automatically with each unsuccessful connect, from
-        ReconnectDelay to ReconnectDelayMax.
-        Set `ReconnectDelay = 0` to avoid automatic reconnection.
-        Disabled because it didn't work properly with HA Async in PR#360.
-
-        ReconnectDelay and ReconnectDelayMax can be set to seconds.milliseconds
-        values using the advanced YAML configuration option.
-    """
+    """Values to pass to the Modbus connection."""
 
     Timeout = 3  # Timeout for a request, in seconds.
-    Retries = 3  # Max number of retries per request.
-    ReconnectDelay = 0  # Minimum in seconds before reconnecting.
-    ReconnectDelayMax = 3  # Maximum in seconds before reconnecting.
 
 
 class SolarEdgeTimeouts(IntEnum):
@@ -161,59 +125,6 @@ class ConfName(StrEnum):
     DEVICE_ID = "device_id"
 
 
-class SunSpecAccum(IntEnum):
-    NA16 = 0x0000
-    NA32 = 0x00000000
-    LIMIT16 = 0xFFFF
-    LIMIT32 = 0xFFFFFFFF
-
-
-class SunSpecNotImpl(IntEnum):
-    INT16 = 0x8000
-    UINT16 = 0xFFFF
-    INT32 = 0x80000000
-    UINT32 = 0xFFFFFFFF
-    FLOAT32 = 0x7FC00000
-
-
-# Battery ID and modbus starting address
-BATTERY_REG_BASE = {
-    1: 57600,
-    2: 57856,
-    3: 58368,
-}
-
-# Meter ID and modbus starting address
-METER_REG_BASE = {
-    1: 40121,
-    2: 40295,
-    3: 40469,
-}
-
-SUNSPEC_SF_RANGE = [
-    -10,
-    -9,
-    -8,
-    -7,
-    -6,
-    -5,
-    -4,
-    -3,
-    -2,
-    -1,
-    0,
-    1,
-    2,
-    3,
-    4,
-    5,
-    6,
-    7,
-    8,
-    9,
-    10,
-]
-
 # parameter names per sunspec
 DEVICE_STATUS = {
     1: "I_STATUS_OFF",
@@ -239,7 +150,6 @@ DEVICE_STATUS_TEXT = {
 }
 
 VENDOR_STATUS = {
-    SunSpecNotImpl.UINT16: None,
     0: "No Error",
     17: "Temperature Too High",
     25: "Isolation Faults",

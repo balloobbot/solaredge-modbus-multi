@@ -37,9 +37,7 @@ NOT_IMPLEMENTED_FLOAT32: Final = 0x7FC00000
 
 def _f32(address: int, **kwargs: Any) -> FloatField:
     """Declare a CDAB 32-bit float with SolarEdge's unimplemented sentinel."""
-    return float32(
-        address, word_order="little", nan=NOT_IMPLEMENTED_FLOAT32, **kwargs
-    )
+    return float32(address, word_order="little", nan=NOT_IMPLEMENTED_FLOAT32, **kwargs)
 
 
 class SiteLimit(Component):

@@ -1,2 +1,2 @@
-pymodbus>=3.8.3
+modbus-connection[tmodbus]>=4.3.0
 awesomeversion>=25.5.0

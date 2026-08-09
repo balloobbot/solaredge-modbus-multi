@@ -126,7 +126,7 @@ def seed_mppt_model(holding: Any, address: int, *, units: int = 2) -> int:
         holding[base + 11] = 2740 + module  # DCW
         holding[base + 12] = u32(6172839 + module)  # DCWH
         holding[base + 14] = u32(0)  # Tms
-        holding[base + 16] = i16(451)  # Tmp
+        holding[base + 16] = i16(45)  # Tmp
         holding[base + 17] = 4  # DCSt
         holding[base + 18] = u32(0)  # DCEvt
     return address + 2 + length
@@ -138,7 +138,12 @@ def seed_meter_model(holding: Any, address: int, *, model_id: int = 203) -> int:
     holding[address + 2] = [i16(300), i16(100), i16(100), i16(100)]  # A, AphA/B/C
     holding[address + 6] = i16(-2)  # A_SF
     holding[address + 7] = [i16(2301), i16(2302), i16(2303), i16(2304)]  # PhV, A, B, C
-    holding[address + 11] = [i16(4001), i16(4002), i16(4003), i16(4004)]  # PPV, AB, BC, CA
+    holding[address + 11] = [
+        i16(4001),
+        i16(4002),
+        i16(4003),
+        i16(4004),
+    ]  # PPV, AB, BC, CA
     holding[address + 15] = i16(-1)  # V_SF
     holding[address + 16] = i16(4999)  # Hz
     holding[address + 17] = i16(-2)  # Hz_SF
@@ -220,7 +225,9 @@ def seed_meter(
     return base
 
 
-def seed_battery(unit: Any, *, battery_id: int = 1, rated_energy: float = 9800.0) -> int:
+def seed_battery(
+    unit: Any, *, battery_id: int = 1, rated_energy: float = 9800.0
+) -> int:
     """Seed a battery in one of the three proprietary slots. All CDAB."""
     base = {1: 57600, 2: 57856, 3: 58368}[battery_id]
     holding = unit.holding

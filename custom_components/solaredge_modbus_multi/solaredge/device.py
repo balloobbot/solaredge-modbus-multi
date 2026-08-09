@@ -147,8 +147,22 @@ class SolarEdgeDevice:
 
         self._group: ComponentGroup | None = None
         self._optional: dict[str, OptionalBlock] = {}
+        self._models: SunSpecModels | None = None
 
     # -- setup -----------------------------------------------------------------
+
+    async def async_scan(self) -> SunSpecModels:
+        """Walk the SunSpec model chain once, and remember what it found.
+
+        Raises :class:`DeviceInvalid` if the unit is not a SunSpec device.
+        """
+        if self._models is not None:
+            return self._models
+        try:
+            self._models = await scan(self._unit, SUNSPEC_BASE_ADDRESS)
+        except SunSpecError as err:
+            raise DeviceInvalid(f"ID {self.unit_id} is not a SunSpec device: {err}")
+        return self._models
 
     async def async_setup(self) -> None:
         """Discover what this unit serves and build the components for it.
@@ -157,16 +171,9 @@ class SolarEdgeDevice:
         no inverter model, and the usual ``ModbusError`` subclasses if it cannot
         be reached at all.
         """
-        try:
-            models = await scan(self._unit, SUNSPEC_BASE_ADDRESS)
-        except SunSpecError as err:
-            raise DeviceInvalid(f"ID {self.unit_id} is not a SunSpec device: {err}")
-
-        common_model = models.first(COMMON_MODEL_ID)
-        if common_model is None:
-            raise DeviceInvalid(f"ID {self.unit_id} publishes no SunSpec common model")
-        self.common = _ranged(Common(self._unit, common_model), common_model.length + 1)
-        await self.common.async_update()
+        models = await self.async_scan()
+        if self.common is None:
+            await self.async_read_identity()
 
         inverter_model = models.first(*INVERTER_MODEL_IDS)
         if inverter_model is None:
@@ -183,17 +190,16 @@ class SolarEdgeDevice:
         self._setup_optional_blocks(inverter_model)
         self._build_group()
 
-    async def async_setup_identity_only(self) -> Common:
-        """Read just the common block, for a device we only want to identify.
+    async def async_read_identity(self) -> Common:
+        """Read the SunSpec identity block, and stop there.
 
-        The EVSE shares the inverter's SunSpec identity block but none of its
-        models, so setup stops here for one.
+        A caller that has to tell an inverter from an EVSE needs the model name
+        before setup goes looking for inverter models, and an EVSE never gets
+        any further than this: it publishes the identity block and nothing
+        else. The scan and the block read are both cached, so a caller that
+        goes on to :meth:`async_setup` does not pay for them twice.
         """
-        try:
-            models = await scan(self._unit, SUNSPEC_BASE_ADDRESS)
-        except SunSpecError as err:
-            raise DeviceInvalid(f"ID {self.unit_id} is not a SunSpec device: {err}")
-
+        models = await self.async_scan()
         common_model = models.first(COMMON_MODEL_ID)
         if common_model is None:
             raise DeviceInvalid(f"ID {self.unit_id} publishes no SunSpec common model")
@@ -355,7 +361,9 @@ class SolarEdgeDevice:
                 for space, values in (await block.component.async_read_raw()).items():
                     raw.setdefault(space, {}).update(values)
             except Exception as err:  # noqa: BLE001 - diagnostics must not fail
-                _LOGGER.debug("I%s: raw read of an optional block failed: %s", self.unit_id, err)
+                _LOGGER.debug(
+                    "I%s: raw read of an optional block failed: %s", self.unit_id, err
+                )
         return {space: dict(sorted(values.items())) for space, values in raw.items()}
 
     # -- optional block access -------------------------------------------------

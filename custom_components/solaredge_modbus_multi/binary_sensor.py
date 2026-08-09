@@ -30,7 +30,9 @@ async def async_setup_entry(
     entities = []
 
     for inverter in hub.inverters:
-        if hub.option_detect_extras and inverter.advanced_power_control:
+        if hub.option_detect_extras and inverter.device.has_block(
+            "advanced_power_control"
+        ):
             entities.append(AdvPowerControlEnabled(inverter, config_entry, coordinator))
 
         entities.append(GridStatusOnOff(inverter, config_entry, coordinator))
@@ -80,10 +82,11 @@ class AdvPowerControlEnabled(SolarEdgeBinarySensorBase):
 
     @property
     def available(self) -> bool:
+        block = self._platform.advanced_power_control
         return (
             super().available
-            and self._platform.advanced_power_control is True
-            and "AdvPwrCtrlEn" in self._platform.decoded_model.keys()
+            and block is not None
+            and block.adv_pwr_ctrl_en is not None
         )
 
     @property
@@ -96,7 +99,7 @@ class AdvPowerControlEnabled(SolarEdgeBinarySensorBase):
 
     @property
     def is_on(self) -> bool:
-        return self._platform.decoded_model["AdvPwrCtrlEn"] == 0x1
+        return self._platform.advanced_power_control.adv_pwr_ctrl_en == 0x1
 
 
 class GridStatusOnOff(SolarEdgeBinarySensorBase):
@@ -106,10 +109,13 @@ class GridStatusOnOff(SolarEdgeBinarySensorBase):
     icon = "mdi:transmission-tower"
 
     @property
+    def _grid_status(self) -> int | None:
+        block = self._platform.grid_status
+        return None if block is None else block.grid_status
+
+    @property
     def available(self) -> bool:
-        return (
-            super().available and "I_Grid_Status" in self._platform.decoded_model.keys()
-        )
+        return super().available and self._grid_status is not None
 
     @property
     def unique_id(self) -> str:
@@ -121,8 +127,10 @@ class GridStatusOnOff(SolarEdgeBinarySensorBase):
 
     @property
     def entity_registry_enabled_default(self) -> bool:
-        return "I_Grid_Status" in self._platform.decoded_model.keys()
+        # Only some firmware serves this register; a device that refused it
+        # during setup gets the entity created but disabled.
+        return self._platform.device.has_block("grid_status") is not False
 
     @property
     def is_on(self) -> bool:
-        return not self._platform.decoded_model["I_Grid_Status"]
+        return not self._grid_status

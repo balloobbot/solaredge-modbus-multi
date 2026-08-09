@@ -18,7 +18,12 @@ from homeassistant.helpers.update_coordinator import (
 )
 
 from .const import DOMAIN, ConfDefaultInt, ConfName, RetrySettings
-from .hub import DataUpdateFailed, HubInitFailed, SolarEdgeModbusMultiHub
+from .hub import (
+    DataUpdateFailed,
+    HubInitFailed,
+    ModbusMapShifted,
+    SolarEdgeModbusMultiHub,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -47,6 +52,9 @@ CONFIG_SCHEMA = vol.Schema(
                 "modbus": vol.Schema(
                     {
                         vol.Optional("timeout"): vol.Coerce(int),
+                        vol.Optional("message_spacing"): vol.Coerce(float),
+                        # Accepted so an existing configuration.yaml still
+                        # validates; the hub logs that they no longer apply.
                         vol.Optional("retries"): vol.Coerce(int),
                         vol.Optional("reconnect_delay"): vol.Coerce(float),
                         vol.Optional("reconnect_delay_max"): vol.Coerce(float),
@@ -264,6 +272,13 @@ class SolarEdgeCoordinator(TimestampDataUpdateCoordinator):
                     "ratio", RetrySettings.Ratio
                 ),
             )
+
+        except ModbusMapShifted as e:
+            # Components are bound to the model addresses discovered at setup.
+            # The device moved them, so setup has to run again to rescan.
+            _LOGGER.warning("SunSpec map shifted, reloading: %s", e)
+            self.hass.config_entries.async_schedule_reload(self.config_entry.entry_id)
+            raise UpdateFailed(f"{e}")
 
         except HubInitFailed as e:
             raise UpdateFailed(f"{e}")

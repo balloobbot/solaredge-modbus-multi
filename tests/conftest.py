@@ -20,6 +20,10 @@ import pytest
 
 _COMPONENT = Path(__file__).resolve().parents[1] / "custom_components"
 sys.path.insert(0, str(_COMPONENT / "solaredge_modbus_multi"))
+# The integration package itself, for the tests that exercise the Home
+# Assistant entity layer. Those need Home Assistant installed; the device
+# library tests do not.
+sys.path.insert(0, str(_COMPONENT))
 
 from .fixtures import (  # noqa: E402
     seed_battery,
