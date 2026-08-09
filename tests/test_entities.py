@@ -261,3 +261,39 @@ async def test_switching_a_mode_bit_preserves_the_others(mock_modbus_unit) -> No
 
     written = (await mock_modbus_unit.read_holding_registers(57344, 1))[0]
     assert written == 0b0000_1100_0000_0001  # bit 10 added, nothing else changed
+
+
+async def test_diagnostics_carry_decoded_values_and_raw_registers(
+    mock_modbus_unit,
+) -> None:
+    from solaredge_modbus_multi import diagnostics
+
+    seed_inverter(mock_modbus_unit, mppt_units=2)
+    seed_meter(mock_modbus_unit, meter_id=1, mppt_units=2)
+    seed_battery(mock_modbus_unit, battery_id=1)
+
+    hub = await _build_hub(mock_modbus_unit, detect_meters=True, detect_batteries=True)
+    hass = type("Hass", (), {})()
+    hass.data = {DOMAIN: {ENTRY_ID: {"hub": hub, "coordinator": StubCoordinator()}}}
+
+    entry = StubConfigEntry()
+    entry.as_dict = lambda: {"entry_id": ENTRY_ID, "data": {"host": "192.0.2.10"}}
+    hass.data[DOMAIN]["yaml"] = {}
+
+    data = await diagnostics.async_get_config_entry_diagnostics(hass, entry)
+
+    inverter = data["inverter_unit_id_1"]
+    assert inverter["model"]["a"] == pytest.approx(12.34)
+    assert inverter["mmppt"]["n"] == 2
+    assert len(inverter["mmppt_modules"]) == 2
+    assert data["meter_id_1"]["model"]["w"] == -1500
+    assert data["battery_id_1"]["model"]["soe"] == pytest.approx(75.0)
+
+    # The raw map is what makes a bug report replayable: it loads straight back
+    # into the mock backend with load_raw().
+    registers = inverter["registers"]["holding"]
+    assert registers["40002"] == 1  # the common model header
+    assert inverter["optional_blocks"]["grid_status"] is True
+
+    # Serial numbers are redacted; the values that identify a fault are not.
+    assert data["meter_id_1"]["common"]["sn"] == "**REDACTED**"

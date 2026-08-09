@@ -16,7 +16,9 @@ from .const import DOMAIN
 _LOGGER = logging.getLogger(__name__)
 
 REDACT_CONFIG = {"unique_id", "host"}
-REDACT_DEVICE = {"identifiers", "serial", "serial_number", "via_device"}
+# "sn" is the SunSpec common block's serial number point and "serial" the
+# battery block's; both identify the user's hardware.
+REDACT_DEVICE = {"identifiers", "serial", "serial_number", "sn", "via_device"}
 
 
 def _library_version() -> str:

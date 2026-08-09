@@ -208,6 +208,14 @@ class SolarEdgeModbusMultiHub:
     async def _async_init_solaredge(self) -> None:
         """Discover every device on the link and read it once."""
 
+        # Setup runs again on every poll until it succeeds, so a run that got
+        # part way through has to start from an empty slate or the devices it
+        # did find would be added twice.
+        self.inverters.clear()
+        self.meters.clear()
+        self.batteries.clear()
+        self.evses.clear()
+
         # Requests connect on demand, so this is only to fail fast: an
         # unreachable host should say so before setup starts walking unit IDs.
         await self.connect()
@@ -390,11 +398,22 @@ class SolarEdgeModbusMultiHub:
         return True
 
     def _raise_issues_for_slow_blocks(self) -> None:
-        """Warn about optional blocks the inverter was too slow to answer."""
-        for inverter in self.inverters:
-            for name in inverter.device.timed_out_blocks():
-                if (issue := _TIMEOUT_ISSUES.get(name)) is not None:
-                    self._async_create_issue(issue, fixable=False)
+        """Warn about optional blocks the inverter was too slow to answer.
+
+        An inverter that starts answering again clears its warning, which the
+        version this replaced never did.
+        """
+        slow = {
+            _TIMEOUT_ISSUES[name]
+            for inverter in self.inverters
+            for name in inverter.device.timed_out_blocks()
+            if name in _TIMEOUT_ISSUES
+        }
+        for issue in set(_TIMEOUT_ISSUES.values()):
+            if issue in slow:
+                self._async_create_issue(issue, fixable=False)
+            else:
+                ir.async_delete_issue(self._hass, DOMAIN, issue)
 
     def _async_create_issue(self, translation_key: str, *, fixable: bool) -> None:
         """Raise one of this integration's repair issues."""
@@ -411,8 +430,8 @@ class SolarEdgeModbusMultiHub:
     async def connect(self) -> None:
         """Open the link.
 
-        Requests connect on demand, so this only exists for callers that want
-        to fail early — the config flow, and setup's first pass.
+        Requests connect on demand, so this exists only so setup can fail with
+        a connection error before it starts walking unit IDs.
         """
         await self._connection.connect()
 
