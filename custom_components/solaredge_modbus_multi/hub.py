@@ -47,12 +47,12 @@ from .const import (
 )
 from .solaredge import (
     BatteryDevice,
+    DeviceInvalid,
     MeterDevice,
     SiteLimit,
     SolarEdgeDevice,
     SolarEdgeOptions,
 )
-from .solaredge import DeviceInvalid as LibraryDeviceInvalid
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -73,20 +73,8 @@ class HubInitFailed(SolarEdgeException):
     """Raised when an error happens during init"""
 
 
-class DeviceInitFailed(SolarEdgeException):
-    """Raised when a device can't be initialized"""
-
-
-class DeviceIsEVSE(SolarEdgeException):
-    """Raised when an inverter device matches a EVSE model"""
-
-
 class DataUpdateFailed(SolarEdgeException):
     """Raised when an update cycle fails"""
-
-
-class DeviceInvalid(SolarEdgeException):
-    """Raised when a device is not usable or invalid"""
 
 
 class ModbusMapShifted(SolarEdgeException):
@@ -253,7 +241,7 @@ class SolarEdgeModbusMultiHub:
                 await device.async_setup()
                 await device.async_add_batteries()
 
-            except LibraryDeviceInvalid as e:
+            except DeviceInvalid as e:
                 # Inverters are mandatory.
                 _LOGGER.error(f"Inverter at {self.hub_host} ID {unit_id}: {e}")
                 raise HubInitFailed(f"{e}")

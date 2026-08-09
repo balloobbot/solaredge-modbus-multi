@@ -27,7 +27,7 @@ integration only ever talks to unit 1. This one is the shared-connection case
 one `for_unit(id)` per inverter, requests serialized internally.
 
 **Meter addresses shift by the length of a model that may not exist.** Meter
-*n* lives at a fixed address (40121, 40295, 40469) — unless the inverter
+_n_ lives at a fixed address (40121, 40295, 40469) — unless the inverter
 publishes SunSpec model 160 (multiple MPPT), in which case every meter slot
 moves along by that model's whole length. The old code carried this as a
 hardcoded `+50` for two MPPT modules and `+70` for three. Those constants are
@@ -40,21 +40,21 @@ is big-endian, as the spec says. Every proprietary block (site limit at 0xE000,
 storage control at 0xE004, batteries at 0xE100/0xE200/0xE300, power control at
 0xF000/0xF100/0xF156) is **CDAB**: 32- and 64-bit values arrive with their
 words swapped. Worse, SolarEdge repurposes two of the SunSpec inverter model's
-vendor event registers as its own scalars, and gives them *different* word
+vendor event registers as its own scalars, and gives them _different_ word
 orders from each other:
 
-| Offset | SunSpec point | SolarEdge uses it as | Word order |
-| --- | --- | --- | --- |
-| 44 | `Evt_Vnd1` | Grid on/off status | CDAB |
-| 50 | `Evt_Vnd4` | Extended error code (firmware ≥ 3.20 only) | ABCD |
+| Offset | SunSpec point | SolarEdge uses it as                       | Word order |
+| ------ | ------------- | ------------------------------------------ | ---------- |
+| 44     | `Evt_Vnd1`    | Grid on/off status                         | CDAB       |
+| 50     | `Evt_Vnd4`    | Extended error code (firmware ≥ 3.20 only) | ABCD       |
 
 So inside one 52-register model, the standard points are big-endian, one vendor
 field is little-endian, and another vendor field is big-endian again.
 
 There is an escape hatch, which I found in the datasheets while checking
-something else and did not take: *"If the controller does not support the
+something else and did not take: _"If the controller does not support the
 Little-Endian word order, there is another linked map using the Big-Endian word
-order at an offset of 0x800."* So the whole CDAB proprietary map is mirrored
+order at an offset of 0x800."_ So the whole CDAB proprietary map is mirrored
 big-endian 2048 registers higher — storage control at 0xE804 rather than
 0xE004. This branch keeps reading the CDAB map, because that is the one the
 integration has always used and the one every user's inverter is known to
@@ -72,7 +72,7 @@ into a neighbouring block (see §3).
 how precise a reading actually is, and this integration feeds `abs(sf)` into
 Home Assistant's `suggested_display_precision`. It is a genuinely good idea that
 most integrations replace with a hardcoded constant, and it is the reason the
-model here declares every scale factor as its own `sunssf` field *as well as*
+model here declares every scale factor as its own `sunssf` field _as well as_
 referencing it from the points it scales — the library's `scale_register` hides
 the exponent, and this integration needs it visible.
 
@@ -88,7 +88,7 @@ compare the reply byte for byte — because setup has to distinguish three cases
 (a SolarEdge inverter, some other Modbus device, nothing at that unit ID) and
 the client library of the day collapsed the last two into one exception. With
 typed exceptions this is now an ordinary read of nine registers: a timeout is
-nobody home, any other answer is *something*, and the "SunS" marker plus a
+nobody home, any other answer is _something_, and the "SunS" marker plus a
 SolarEdge manufacturer string is an inverter.
 
 **A write mutex the coordinator busy-waits on.** SolarEdge's control registers
@@ -100,9 +100,11 @@ site-limit control are behind an opt-in with a warning that writing them
 repeatedly may damage the inverter.
 
 **Read-modify-write on a packed mode word.** `E_Lim_Ctl_Mode` packs three
-mutually exclusive limit modes (bits 0–2) and two independent flags (bits 10 and
-11) into one register, exposed as one select and two switches. Flipping any of
-them reads the last polled value, edits a bit, and writes the whole word back.
+mutually exclusive limit modes (bits 0–2) plus two independent flags (bits 10
+and 11) into one register, exposed as one select and two switches. Changing any
+one of them means writing all five back, and SolarEdge serves no atomic mask
+write, so the read-modify-write is unavoidable — see §3.9 for where it ended up
+living.
 
 ### Three latent bugs the declarative model surfaced
 
@@ -138,7 +140,7 @@ function was called, and no class was reached around. Two things needed more
 than the documented surface:
 
 **Subclassing `StringField` to override `decode`.** `decode_string()` decodes
-ASCII and strips only *trailing* NULs, which is what the SunSpec spec describes
+ASCII and strips only _trailing_ NULs, which is what the SunSpec spec describes
 and not what SolarEdge sends: embedded NULs, trailing spaces, non-ASCII bytes,
 and control-character padding on battery strings. Decoding as UTF-8 with
 `errors="ignore"` and dropping every code point below U+0020 reproduces exactly
@@ -148,7 +150,7 @@ end up in device names and entity unique IDs. `StringField` is public and
 just something every SunSpec library ends up writing.
 (`solaredge/fields.py`, 33 lines.)
 
-**Setting `register_ranges` on component *instances*.** Documented as a class
+**Setting `register_ranges` on component _instances_.** Documented as a class
 attribute, but the value this library needs is only known at runtime: it is
 `SunSpecModel.length + 1` for the model the chain reported. `restrict_fields()`
 assigns it per-instance internally, so instance assignment clearly works, but
@@ -165,7 +167,7 @@ exactly as documented.
 Worth noting on the positive side: the **SunSpec model generator produced
 usable classes on the first run**. `python -m modbus_connection.model.sunspec.generate 1 103 160 203`
 emitted the common block, the inverter model, the meter model, and the
-multiple-MPPT model *including* its `repeating_group` with the right stride and
+multiple-MPPT model _including_ its `repeating_group` with the right stride and
 the scale factors correctly left in the parent's fixed block. Models 101/102/103
 turned out to share one layout, as did 201/202/203/204, so the generated output
 collapsed to four classes. Almost all of `solaredge/models.py` is that output
@@ -187,19 +189,19 @@ Pooling the inverter's common block and its model into one `ComponentGroup`
 produced a single 121-register read spanning 40002–40122 — because gap-based
 planning happily bridges the 13-register gap between the end of one SunSpec
 model and the start of the next. That read covers 40113, which is one of the
-registers some SolarEdge firmware refuses. On such a device the *entire poll*
+registers some SolarEdge firmware refuses. On such a device the _entire poll_
 would fail, where the code being replaced only lost one optional sensor. The
 test that caught it is
 `tests/test_device.py::test_a_refused_optional_block_does_not_fail_the_poll`.
 
 The fix is readable ranges, and there the group's rules bite:
 
-```
+```text
 every holding-space component in a ComponentGroup must declare register_ranges
 if any does, but some left it unset
 ```
 
-So constraining *one* component means constraining *all* of them, and each has
+So constraining _one_ component means constraining _all_ of them, and each has
 to be given its exact span — which for a SunSpec component is only known at
 runtime. That is `_ranged()` in `solaredge/device.py`. Once every member
 declares a range, the planner also stops merging across model boundaries
@@ -215,7 +217,7 @@ Concretely:
   "never read an address no field claims and no range declares" the default, and
   gap-bridging the opt-in.
 - **`require_declared` is too coarse.** A component that says nothing about the
-  map is not *disagreeing* with one that does; it just has no opinion. Treating
+  map is not _disagreeing_ with one that does; it just has no opinion. Treating
   "unset" as "my declared fields' spans" would let a group mix constrained and
   unconstrained members without the current error.
 - **Give `SunSpecComponent` its span for free.** It is constructed with a
@@ -274,7 +276,7 @@ per-field override still handles the genuinely mixed case in §1.
 ### 3.5 `float32(nan=...)` wants a raw sentinel it doesn't use
 
 `FloatField.decode` tests `if self.nan is not None and math.isnan(value)`, so
-the *value* passed to `nan=` is irrelevant — it is a flag. But the parameter is
+the _value_ passed to `nan=` is irrelevant — it is a flag. But the parameter is
 typed and documented as a raw sentinel, so `solaredge/proprietary.py` passes
 `nan=0x7FC00000` and a reader reasonably assumes that exact bit pattern is being
 matched. `nan=True`, or a separate `nan_is_none=True`, would say what it means.
@@ -291,8 +293,8 @@ independently.
 ### 3.7 `scan()` throws away chain order, which is meaningful
 
 `SunSpecModels` is a dict keyed by model ID with a `first()` helper. But a
-SunSpec chain is *ordered*, and on SolarEdge position is load-bearing: meter
-*n*'s identity block is a model 1, and the meter model that belongs to it is the
+SunSpec chain is _ordered_, and on SolarEdge position is load-bearing: meter
+_n_'s identity block is a model 1, and the meter model that belongs to it is the
 next model in the chain, not "the nth model 203". Reconstructing that means
 flattening every list and re-sorting by address — `_chain()` and `_at()` in
 `solaredge/device.py`.
@@ -306,7 +308,7 @@ library the same detour.
 A truncated or corrupt chain raises, and everything behind the break is lost
 with no way to resume the walk from a known address. This integration is
 insulated because SolarEdge's chains are well-formed in practice, but the
-fallback it *would* want — "scan failed, probe my known address table instead" —
+fallback it _would_ want — "scan failed, probe my known address table instead" —
 has no supported shape. `scan(unit, base, on_error="stop")` returning what it
 found, or a public `read_model_header(unit, address)`, would give libraries
 somewhere to land.
@@ -319,12 +321,12 @@ switches over the independent flags. Changing any of them means writing all
 five back, and there is no field-level way to express that.
 
 `ModbusUnit.mask_write_register` (FC 0x16) would make it atomic at the device,
-but **SolarEdge does not implement it**: its *SunSpec Implementation Technical
-Note* (v3.2, June 2025), Appendix A, documents the main functions as `0x03`,
+but **SolarEdge does not implement it**: its _SunSpec Implementation Technical
+Note_ (v3.2, June 2025), Appendix A, documents the main functions as `0x03`,
 `0x06` and `0x10` only, and this integration has never issued anything but
 `0x03` and `0x10`. So the read-modify-write is unavoidable here.
 
-What that changes is *where* it belongs. Doing it in the entities means writing
+What that changes is _where_ it belongs. Doing it in the entities means writing
 back the value from the last poll, up to a full scan interval stale — anything
 that touched another bit meanwhile is silently reverted. So this branch puts it
 on the component instead:
@@ -363,7 +365,7 @@ across inverters that it would earn its place —
   custom integrations.** The documented layering assumes the library is a
   separate PyPI package. A HACS integration that ships it inside the component
   (`custom_components/<domain>/<lib>/`) can only import it standalone by putting
-  the *component* directory on `sys.path`, because importing it as
+  the _component_ directory on `sys.path`, because importing it as
   `<domain>.<lib>` executes the integration's `__init__` and pulls in Home
   Assistant. `tests/conftest.py` here does exactly that, and it is worth a
   paragraph on the integration page — the alternative (tests that import Home

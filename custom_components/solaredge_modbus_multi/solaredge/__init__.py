@@ -22,9 +22,9 @@ from .models import (
     Inverter,
     Meter,
     MeterEvents,
+    Mppt,
     MpptModule,
     MpptModuleOperatingState,
-    Mppt,
     OperatingState,
     StatusVendor4,
 )
