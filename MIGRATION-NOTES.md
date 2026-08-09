@@ -51,6 +51,16 @@ orders from each other:
 So inside one 52-register model, the standard points are big-endian, one vendor
 field is little-endian, and another vendor field is big-endian again.
 
+There is an escape hatch, which I found in the datasheets while checking
+something else and did not take: *"If the controller does not support the
+Little-Endian word order, there is another linked map using the Big-Endian word
+order at an offset of 0x800."* So the whole CDAB proprietary map is mirrored
+big-endian 2048 registers higher — storage control at 0xE804 rather than
+0xE004. This branch keeps reading the CDAB map, because that is the one the
+integration has always used and the one every user's inverter is known to
+answer, and `word_order="little"` costs one keyword per field. Worth knowing it
+exists if the mirrored map ever turns out to be better supported.
+
 **Firmware that refuses registers inside a model it advertises.** Some
 inverters answer a read of those same vendor event registers with an exception
 even though model 103 declares a length that covers them. The old code
@@ -305,11 +315,22 @@ somewhere to land.
 
 `E_Lim_Ctl_Mode` is one register holding five independent settings, exposed as
 three entities. Each write is a read-modify-write of the whole word against the
-value from the last poll — inherently racy, and there is no field-level way to
-express it. `ModbusUnit.mask_write_register` (FC 0x16) exists and is exactly the
-right primitive, but there is no `component.write_bits("field", {10: True})` to
-reach it, and no writable `bitfield` field type. Packed mode words are common
-enough across inverters that this would earn its place.
+value from the last poll, and there is no field-level way to express it — so the
+same bit arithmetic is written out in each of the three entities, and the value
+written back is up to a full poll interval stale.
+
+`ModbusUnit.mask_write_register` (FC 0x16) would make this atomic at the device,
+but **SolarEdge does not implement it**: its *SunSpec Implementation Technical
+Note* (v3.2, June 2025), Appendix A, documents the main functions as `0x03`,
+`0x06` and `0x10` only, and this integration has never issued anything but
+`0x03` and `0x10`. So the race is inherent here.
+
+That is an argument for the library owning the read-modify-write rather than
+against it: a `write()` on a bit field could re-read the register immediately
+before writing, narrowing the window from one poll interval to one round trip —
+better than any consumer can do for itself — and could still prefer FC 0x16 on
+devices that do implement it. Packed mode words are common enough across
+inverters that a writable `bit`/`bits` field type would earn its place.
 
 ### 3.10 Smaller things
 
