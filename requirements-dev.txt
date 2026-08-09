@@ -1,0 +1,7 @@
+# Everything the test suite needs. The device library tests run against
+# modbus-connection's mock backend; the entity tests import Home Assistant but
+# do not start it.
+-r requirements.txt
+homeassistant>=2025.2.0
+pytest>=8
+pytest-asyncio>=0.24

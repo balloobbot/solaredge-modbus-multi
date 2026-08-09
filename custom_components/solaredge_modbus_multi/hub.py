@@ -202,10 +202,15 @@ class SolarEdgeModbusMultiHub:
             detect_extras=self._detect_extras,
             storage_control=self._adv_storage_control,
             site_limit_control=self._adv_site_limit_control,
+            slow_block_timeout=SolarEdgeTimeouts.Read / 1000,
         )
 
     async def _async_init_solaredge(self) -> None:
         """Discover every device on the link and read it once."""
+
+        # Requests connect on demand, so this is only to fail fast: an
+        # unreachable host should say so before setup starts walking unit IDs.
+        await self.connect()
 
         if self.option_storage_control:
             _LOGGER.warning(

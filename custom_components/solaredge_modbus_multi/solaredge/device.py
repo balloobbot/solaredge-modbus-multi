@@ -9,15 +9,12 @@ unit, so all of it pools into one set of block reads.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from modbus_connection import (
-    IllegalDataAddressError,
-    IllegalFunctionError,
-    ModbusTimeoutError,
-)
+from modbus_connection import IllegalDataAddressError, IllegalFunctionError
 from modbus_connection.model import Component, ComponentGroup
 from modbus_connection.model.sunspec import SunSpecError, SunSpecModel, scan
 
@@ -66,6 +63,14 @@ class SolarEdgeOptions:
     storage_control: bool = False
     site_limit_control: bool = False
 
+    slow_block_timeout: float | None = None
+    """Seconds to allow the power control blocks, which answer slowly.
+
+    ``modbus_connection`` takes one timeout for the whole connection, and it has
+    to suit an ordinary poll. These two blocks are known to take several times
+    as long on some inverters, so they get their own budget on top.
+    """
+
 
 @dataclass
 class OptionalBlock:
@@ -80,6 +85,8 @@ class OptionalBlock:
     component: Component
     supported: bool | None = None
     timed_out: bool = False
+    timeout: float | None = None
+    """Seconds this block is allowed, over the connection's own timeout."""
 
 
 class MeterDevice:
@@ -255,18 +262,24 @@ class SolarEdgeDevice:
             ),
         }
         if self.options.detect_extras:
+            slow = self.options.slow_block_timeout
             self._optional["global_power_control"] = OptionalBlock(
-                GlobalPowerControl(self._unit, base_offset=GLOBAL_POWER_CONTROL_ADDRESS)
+                GlobalPowerControl(
+                    self._unit, base_offset=GLOBAL_POWER_CONTROL_ADDRESS
+                ),
+                timeout=slow,
             )
             self._optional["advanced_power_control"] = OptionalBlock(
                 AdvancedPowerControl(
                     self._unit, base_offset=ADVANCED_POWER_CONTROL_ADDRESS
-                )
+                ),
+                timeout=slow,
             )
             self._optional["advanced_power_control_2"] = OptionalBlock(
                 AdvancedPowerControl2(
                     self._unit, base_offset=ADVANCED_POWER_CONTROL_2_ADDRESS
-                )
+                ),
+                timeout=slow,
             )
         if self.options.site_limit_control:
             self._optional["site_limit"] = OptionalBlock(
@@ -336,11 +349,15 @@ class SolarEdgeDevice:
         if block.supported is False:
             return
         try:
-            await block.component.async_update()
+            if block.timeout is None:
+                await block.component.async_update()
+            else:
+                async with asyncio.timeout(block.timeout):
+                    await block.component.async_update()
         except (IllegalDataAddressError, IllegalFunctionError):
             block.supported = False
             _LOGGER.debug("I%s: %s NOT available", self.unit_id, name)
-        except ModbusTimeoutError:
+        except TimeoutError:
             # Left unsettled on purpose: an inverter that is merely slow to
             # answer this block should get another chance next cycle.
             block.timed_out = True

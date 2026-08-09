@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 from modbus_connection import IllegalDataAddressError, ModbusTimeoutError
+from modbus_connection.model.sunspec import SunSpecMapShiftError
 from solaredge import DeviceInvalid, SolarEdgeDevice, SolarEdgeOptions
 
 from .fixtures import seed_battery, seed_inverter, seed_meter
@@ -224,3 +225,65 @@ async def test_raw_read_covers_the_optional_blocks(mock_modbus_unit) -> None:
     assert holding[40002] == 1  # the common model header
     assert holding[40069 + 44] == 0  # an optional block's registers are in there
     assert sorted(holding) == list(holding)  # addresses ascending, for diagnostics
+
+
+async def test_a_moved_model_is_reported_rather_than_read_stale(
+    mock_modbus_unit,
+) -> None:
+    seed_inverter(mock_modbus_unit)
+
+    device = SolarEdgeDevice(mock_modbus_unit, 1)
+    await device.async_setup()
+    await device.async_update()
+
+    # A firmware update rearranges the chain, so the components built at setup
+    # now point at the wrong registers. The header check catches it.
+    mock_modbus_unit.holding[40069] = [160, 48]
+
+    with pytest.raises(SunSpecMapShiftError):
+        await device.async_update()
+
+
+async def test_the_slow_blocks_get_their_own_budget(mock_modbus_unit) -> None:
+    seed_inverter(mock_modbus_unit)
+
+    device = SolarEdgeDevice(
+        mock_modbus_unit,
+        1,
+        SolarEdgeOptions(detect_extras=True, slow_block_timeout=6.0),
+    )
+    await device.async_setup()
+
+    # The power control blocks answer slowly on some inverters and need more
+    # than the connection-wide timeout; nothing else does.
+    budgets = {name: block.timeout for name, block in device._optional.items()}
+    assert budgets == {
+        "grid_status": None,
+        "status_vendor4": None,
+        "global_power_control": 6.0,
+        "advanced_power_control": 6.0,
+        "advanced_power_control_2": 6.0,
+    }
+
+
+async def test_an_evse_stops_at_its_identity_block(mock_modbus_unit) -> None:
+    from .fixtures import END_OF_CHAIN, seed_common
+
+    # An EVSE publishes the SunSpec identity block and no models behind it.
+    mock_modbus_unit.holding[40000] = [0x5375, 0x6E53]
+    after = seed_common(
+        mock_modbus_unit.holding, 40002, model="SE-EV-SA-KIT-A", serial="EV0001"
+    )
+    mock_modbus_unit.holding[after] = END_OF_CHAIN
+
+    device = SolarEdgeDevice(mock_modbus_unit, 2)
+    common = await device.async_read_identity()
+
+    assert common.md == "SE-EV-SA-KIT-A"
+    assert common.sn == "EV0001"
+
+    await device.async_update()  # polling one only refreshes its identity
+    assert device.common.vr == "0004.0019.0033"
+
+    with pytest.raises(DeviceInvalid):
+        await device.async_setup()  # there is no inverter model behind it
