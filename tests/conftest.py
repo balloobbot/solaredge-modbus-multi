@@ -25,12 +25,7 @@ sys.path.insert(0, str(_COMPONENT / "solaredge_modbus_multi"))
 # library tests do not.
 sys.path.insert(0, str(_COMPONENT))
 
-from .fixtures import (  # noqa: E402
-    seed_battery,
-    seed_inverter,
-    seed_meter,
-    seed_mppt,
-)
+from .fixtures import seed_battery, seed_inverter, seed_meter, seed_mppt  # noqa: E402
 
 __all__ = ["seed_battery", "seed_inverter", "seed_meter", "seed_mppt"]
 

@@ -11,10 +11,7 @@ import pytest
 
 pytest.importorskip("homeassistant")
 
-from modbus_connection import (  # noqa: E402
-    IllegalDataAddressError,
-    ModbusTimeoutError,
-)
+from modbus_connection import IllegalDataAddressError, ModbusTimeoutError  # noqa: E402
 from modbus_connection.mock import MockModbusConnection  # noqa: E402
 from solaredge_modbus_multi.scanner import SolarEdgeDeviceScanner  # noqa: E402
 
