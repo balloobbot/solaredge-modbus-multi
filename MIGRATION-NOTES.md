@@ -346,9 +346,15 @@ polled attribute has already lost the chance to do it. The select and both
 switches now pass a mask and a value and hold no bit arithmetic of their own.
 
 That helper is deliberately shaped like what the library should offer: a
-writable `bit` / `bits` field type whose `write()` re-reads first, and prefers
-FC 0x16 on devices that do implement it. Packed mode words are common enough
-across inverters that it would earn its place —
+writable `flag(register, bit)` field whose `write()` re-reads first, plus a
+`write_flags({...})` that sets several flags of one register in a single write.
+Both halves are needed here, and the datasheet says why. Eleven of the
+register's sixteen bits are **Reserved**, so a write must be masked — the model
+cannot know what is in them. And bits 0-2 carry "Only single selection is
+allowed", so changing the selection has to clear two and set one _in one
+write_; done as three per-flag writes it passes through states the device
+explicitly forbids. Packed flag registers with reserved bits are common enough
+across inverters that this would earn its place —
 [home-assistant-libs/modbus-connection#150](https://github.com/home-assistant-libs/modbus-connection/issues/150).
 
 ### 3.10 Smaller things
