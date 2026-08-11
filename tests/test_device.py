@@ -216,6 +216,39 @@ async def test_one_poll_pools_the_whole_unit(mock_modbus_unit) -> None:
     ]
 
 
+@pytest.mark.parametrize("mppt_units", [None, 2, 3])
+async def test_no_pooled_read_reaches_the_vendor_event_registers(
+    mock_modbus_unit, mppt_units
+) -> None:
+    # 40109-40120 is claimed by nothing: the inverter model's fields stop at
+    # ``st_vnd`` (40108) and the next model in the chain starts at 40121. A read
+    # crossing it would touch 40113 and 40119, which some firmware refuses and
+    # which would then fail the whole poll rather than one optional block. A gap
+    # no member claims separates two readable runs, so the planner may not
+    # bridge it however the models around it are laid out.
+    seed_inverter(mock_modbus_unit, mppt_units=mppt_units)
+    seed_meter(mock_modbus_unit, meter_id=1, mppt_units=mppt_units)
+    seed_battery(mock_modbus_unit, battery_id=1)
+
+    device = SolarEdgeDevice(
+        mock_modbus_unit, 1, SolarEdgeOptions(detect_batteries=True)
+    )
+    await device.async_setup()
+    await device.async_add_batteries()
+
+    mock_modbus_unit.read_events.clear()
+    await device.async_update()
+
+    for address in (40113, 40119):
+        covering = [
+            (event.address, event.count)
+            for event in mock_modbus_unit.read_events
+            if event.address <= address < event.address + event.count
+        ]
+        # Only the optional block's own two-register read reaches it.
+        assert covering == [(address, 2)]
+
+
 async def test_raw_read_covers_the_optional_blocks(mock_modbus_unit) -> None:
     seed_inverter(mock_modbus_unit)
 
