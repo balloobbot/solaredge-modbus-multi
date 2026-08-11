@@ -101,8 +101,8 @@ class MeterDevice:
     ) -> None:
         self.meter_id = meter_id
         self.model_id = meter_model.model_id
-        self.common = _ranged(Common(unit, common_model), common_model.length + 1)
-        self.meter = _ranged(Meter(unit, meter_model), meter_model.length + 1)
+        self.common = Common(unit, common_model)
+        self.meter = Meter(unit, meter_model)
 
     @property
     def components(self) -> list[Component]:
@@ -185,11 +185,12 @@ class SolarEdgeDevice:
         inverter_model = models.first(*INVERTER_MODEL_IDS)
         if inverter_model is None:
             raise DeviceInvalid(f"ID {self.unit_id} is not a SunSpec inverter")
-        # Deliberately narrower than the model: the readable range stops at the
-        # last point we decode, so no pooled read can ever span the vendor
-        # event registers behind it. Firmware that refuses those registers
-        # would otherwise fail the whole poll instead of one optional block.
-        self.inverter = _ranged(Inverter(self._unit, inverter_model), 39)
+        # ``Inverter`` deliberately stops at ``st_vnd``, short of the model's
+        # end, and a component that declares no readable map stands for exactly
+        # the addresses it reads — so no pooled read can reach the vendor event
+        # registers behind it. Firmware that refuses those would otherwise fail
+        # the whole poll instead of one optional block.
+        self.inverter = Inverter(self._unit, inverter_model)
 
         self._setup_mppt(models)
         if self.options.detect_meters:
@@ -210,7 +211,7 @@ class SolarEdgeDevice:
         common_model = models.first(COMMON_MODEL_ID)
         if common_model is None:
             raise DeviceInvalid(f"ID {self.unit_id} publishes no SunSpec common model")
-        self.common = _ranged(Common(self._unit, common_model), common_model.length + 1)
+        self.common = Common(self._unit, common_model)
         await self.common.async_update()
         self._group = ComponentGroup(self._unit, [self.common])
         return self.common
@@ -221,7 +222,7 @@ class SolarEdgeDevice:
         if mppt_model is None:
             _LOGGER.debug("I%s is NOT Multiple MPPT", self.unit_id)
             return
-        self.mppt = _ranged(Mppt(self._unit, mppt_model), mppt_model.length + 1)
+        self.mppt = Mppt(self._unit, mppt_model)
         _LOGGER.debug("I%s is Multiple MPPT", self.unit_id)
 
     def _setup_meters(self, models: SunSpecModels) -> None:
@@ -230,18 +231,17 @@ class SolarEdgeDevice:
         SolarEdge keeps meter *n* at a fixed address, shifted along by the whole
         multiple-MPPT model when the inverter publishes one. The shift used to
         be hardcoded as 50 or 70 registers; the model chain reports the model's
-        real length instead, so the arithmetic comes from the device.
+        real span instead, so the arithmetic comes from the device.
         """
         mppt_model = models.first(MMPPT_MODEL_ID)
-        shift = 0 if mppt_model is None else mppt_model.length + 2
-        chain = _chain(models)
+        shift = 0 if mppt_model is None else mppt_model.span
 
         for meter_id, base in METER_REG_BASE.items():
-            common_model = _at(chain, base + shift)
+            common_model = models.at(base + shift)
             if common_model is None or common_model.model_id != COMMON_MODEL_ID:
                 _LOGGER.debug("I%sM%s: no common block", self.unit_id, meter_id)
                 continue
-            meter_model = _at(chain, base + shift + METER_MODEL_OFFSET)
+            meter_model = models.at(base + shift + METER_MODEL_OFFSET)
             if meter_model is None or meter_model.model_id not in METER_MODEL_IDS:
                 _LOGGER.debug("I%sM%s: no meter model", self.unit_id, meter_id)
                 continue
@@ -445,37 +445,3 @@ class SolarEdgeDevice:
     def is_mmppt(self) -> bool:
         """Whether this inverter publishes the multiple MPPT model."""
         return self.mppt is not None
-
-
-def _ranged[C: Component](component: C, last_offset: int) -> C:
-    """Constrain a component to the registers it actually reads.
-
-    Every component pooled into one ``ComponentGroup`` has to describe the
-    device's readable map, or none may — so each polled component states the
-    span it occupies. Without this the planner is free to merge across the gap
-    between two SunSpec models, producing a block read that covers registers no
-    field asked for. On SolarEdge that is not merely wasteful: some firmware
-    refuses the vendor event registers that sit in exactly such a gap, and a
-    refused register anywhere in a block fails the whole read.
-
-    A SunSpec model's span comes off the chain — ``length`` plus its two header
-    registers — so it is the device's own answer rather than a constant.
-    """
-    component.register_ranges = ((0, last_offset),)
-    return component
-
-
-def _chain(models: SunSpecModels) -> list[SunSpecModel]:
-    """Flatten a scan result back into address order."""
-    return sorted(
-        (model for found in models.values() for model in found),
-        key=lambda model: model.address,
-    )
-
-
-def _at(chain: list[SunSpecModel], address: int) -> SunSpecModel | None:
-    """Return the model whose header sits at ``address``, if any."""
-    for model in chain:
-        if model.address == address:
-            return model
-    return None

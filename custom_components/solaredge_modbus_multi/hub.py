@@ -49,7 +49,6 @@ from .solaredge import (
     BatteryDevice,
     DeviceInvalid,
     MeterDevice,
-    SiteLimit,
     SolarEdgeDevice,
     SolarEdgeOptions,
 )
@@ -438,17 +437,6 @@ class SolarEdgeModbusMultiHub:
         """Write one field."""
         await self._async_guarded_write(field, lambda: component.write(field, value))
 
-    async def async_write_mode_bits(
-        self, component: SiteLimit | None, mask: int, value: int
-    ) -> None:
-        """Change part of a packed control register, leaving the rest alone."""
-        if component is None:
-            raise HomeAssistantError("This inverter does not serve the site limit.")
-        await self._async_guarded_write(
-            f"mode bits {mask:#06x}",
-            lambda: component.write_mode_bits(mask, value),
-        )
-
     async def _async_guarded_write(self, field: str, write) -> None:
         """Run a write, holding off the coordinator while it happens.
 
@@ -664,10 +652,6 @@ class SolarEdgeInverter:
                 f"Inverter ID {self.inverter_unit_id} does not serve {field}."
             )
         await self.hub.async_write(component, field, value)
-
-    async def async_write_mode_bits(self, mask: int, value: int) -> None:
-        """Change part of this inverter's packed limit control mode word."""
-        await self.hub.async_write_mode_bits(self.site_limit, mask, value)
 
     @property
     def common(self):

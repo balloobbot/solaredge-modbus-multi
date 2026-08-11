@@ -195,18 +195,20 @@ async def test_one_poll_pools_the_whole_unit(mock_modbus_unit) -> None:
     assert all(block.count <= 125 for block in blocks)
     assert all(block.register_type == "holding" for block in blocks)
 
-    # One read per SunSpec model, two for the battery's split block, and one
-    # each for the two optional inverter blocks. Pooling does not collapse
-    # these further, because each component's readable range stops the planner
-    # from merging across a model boundary — which is the point: a merged read
-    # would cover registers no field asked for.
+    # A component that declares no readable map stands for the addresses it
+    # reads by itself, so the planner may join models that sit back to back but
+    # never bridges a gap no field claims. That is the property that matters:
+    # the inverter model's claim stops at ``st_vnd`` (40108), so no pooled read
+    # reaches the vendor event registers at 40113 and 40119 that some firmware
+    # refuses — those stay their own small reads. Where models do abut, the
+    # reads merge and are cut at the 125-register Modbus ceiling instead of at
+    # a model boundary, which costs nothing: every register in them is one a
+    # field asked for.
     assert [(block.address, block.count) for block in blocks] == [
-        (40002, 67),  # inverter common
-        (40069, 40),  # inverter model, stopping short of the vendor events
-        (40121, 67),  # meter 1 common
-        (40188, 107),  # meter 1 model
-        (40295, 67),  # meter 2 common
-        (40362, 107),  # meter 2 model
+        (40002, 107),  # inverter common and inverter model, back to back
+        (40121, 124),  # both meters' common blocks and models, in three reads
+        (40245, 125),
+        (40370, 99),
         (57600, 76),  # battery identity and power limits
         (57708, 46),  # battery measurements, past the unmapped hole
         (40113, 2),  # grid status, on its own

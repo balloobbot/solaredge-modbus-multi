@@ -18,7 +18,6 @@ from .const import (
     STORAGE_CONTROL_MODE,
     STORAGE_MODE,
 )
-from .solaredge import SiteLimit
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -224,8 +223,9 @@ class StorageCommandMode(SolarEdgeRemoteControlSelect):
 class SolaredgeLimitControlMode(SolarEdgeSelectBase):
     """The three mutually exclusive low bits of the limit control mode word.
 
-    Unlike the other selects this one is not a value but a bit position, so
-    changing it is a read-modify-write of the whole mode register.
+    Unlike the other selects this one is not a value but a bit position. The
+    three bits are one packed field, so selecting a mode clears the other two
+    in the same write and the rest of the register is left alone.
     """
 
     def __init__(self, platform, config_entry, coordinator):
@@ -236,7 +236,7 @@ class SolaredgeLimitControlMode(SolarEdgeSelectBase):
     @property
     def _mode(self) -> int | None:
         block = self._platform.site_limit
-        return None if block is None else block.e_lim_ctl_mode
+        return None if block is None else block.limit_mode
 
     @property
     def available(self) -> bool:
@@ -265,7 +265,7 @@ class SolaredgeLimitControlMode(SolarEdgeSelectBase):
         value = 0 if new_mode is None else 1 << int(new_mode)
 
         _LOGGER.debug(f"set {self.unique_id} to bit {new_mode}")
-        await self._platform.async_write_mode_bits(SiteLimit.LIMIT_MODE_BITS, value)
+        await self._platform.async_write(self._platform.site_limit, "limit_mode", value)
         await self.async_update()
 
 

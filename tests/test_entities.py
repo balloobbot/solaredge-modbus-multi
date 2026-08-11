@@ -102,10 +102,6 @@ class StubHub:
         self.writes.append((type(component).__name__, field, value))
         await component.write(field, value)
 
-    async def async_write_mode_bits(self, component, mask, value):
-        self.writes.append((type(component).__name__, f"bits {mask:#06x}", value))
-        await component.write_mode_bits(mask, value)
-
 
 async def _build_hub(unit, **options) -> StubHub:
     """Discover a seeded unit and wrap it the way the real hub does."""
@@ -307,10 +303,10 @@ async def test_a_mode_bit_write_rereads_first(mock_modbus_unit) -> None:
     """A change made since the last poll survives flipping another bit.
 
     The register packs five settings and SolarEdge serves no atomic mask
-    write, so setting one is a read-modify-write. Doing it on the component
-    means re-reading here rather than writing back the value from the last
-    poll — which is the difference between losing a concurrent change and
-    keeping it.
+    write, so setting one is a read-modify-write. Declaring each setting as
+    the bits it owns puts that read in the write itself, rather than writing
+    back the value from the last poll — which is the difference between losing
+    a concurrent change and keeping it.
     """
     seed_inverter(mock_modbus_unit)
     mock_modbus_unit.holding[57344] = [0b0000_1000_0000_0000, 0]  # bit 11 set
@@ -323,7 +319,9 @@ async def test_a_mode_bit_write_rereads_first(mock_modbus_unit) -> None:
     # Something else — the installer app, the inverter itself — sets bit 0
     # after our last poll. Home Assistant's cached copy does not have it.
     mock_modbus_unit.holding[57344] = 0b0000_1000_0000_0001
-    assert hub.inverters[0].site_limit.e_lim_ctl_mode == 0b0000_1000_0000_0000
+    assert hub.inverters[0].site_limit.limit_mode == 0
+    assert hub.inverters[0].site_limit.negative_limit is True
+    assert hub.inverters[0].site_limit.external_production is False
 
     await external._async_set_bit(True)
 

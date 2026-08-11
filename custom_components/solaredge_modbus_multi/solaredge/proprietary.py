@@ -22,6 +22,8 @@ from typing import Any, Final
 from modbus_connection.model import (
     Component,
     FloatField,
+    bit,
+    bits,
     float32,
     int32,
     integer,
@@ -41,47 +43,39 @@ def _f32(address: int, **kwargs: Any) -> FloatField:
 
 
 class SiteLimit(Component):
-    """Export/site limitation control (0xE000)."""
+    """Export/site limitation control (0xE000).
 
-    LIMIT_MODE_BITS: Final = 0b111
-    """Bits 0-2: which quantity is limited. Mutually exclusive; none is off."""
+    ``e_lim_ctl_mode`` packs five settings and eleven reserved bits into one
+    register, so each setting is declared as the bits it owns. Writing one
+    re-reads the register and merges, leaving the rest — including the reserved
+    bits, whose contents this model cannot know — alone. SolarEdge does not
+    serve FC 0x16 (mask write), so the read-modify-write cannot be made atomic;
+    what re-reading buys is a window of one round trip rather than a whole poll
+    interval in which another writer's change could be lost.
+    """
 
-    EXTERNAL_PRODUCTION_BIT: Final = 1 << 10
+    e_lim_ctl_mode = integer(0, signed=False)
+    """The whole limit control mode word, for diagnostics. Written per setting."""
+
+    limit_mode = bits(0, 0, 3, writable=True)
+    """Bits 0-2: which quantity is limited; zero is off.
+
+    One field rather than three, because the device allows only a single
+    selection: changing it has to clear two bits and set one in the same write,
+    or it passes through a state SolarEdge documents as forbidden.
+    """
+
+    external_production = bit(0, 10, writable=True)
     """Bit 10: a non-SolarEdge power source is present on the site."""
 
-    NEGATIVE_LIMIT_BIT: Final = 1 << 11
+    negative_limit = bit(0, 11, writable=True)
     """Bit 11: the limit is a minimum import rather than a maximum export."""
-
-    e_lim_ctl_mode = integer(0, signed=False, writable=True)
-    """Limit control mode: five independent settings packed into one register."""
 
     e_lim_ctl = integer(1, signed=False, writable=True)
     """Limit control: which meter/connection the limit is measured at."""
 
     e_site_limit = _f32(2, writable=True)
     """The site limit itself, in the unit selected by the mode."""
-
-    async def write_mode_bits(self, mask: int, value: int) -> None:
-        """Replace the bits in ``mask`` with ``value``, leaving the rest alone.
-
-        ``e_lim_ctl_mode`` packs five independent settings, each its own entity,
-        so changing one means writing all five back. SolarEdge does not serve
-        FC 0x16 (mask write), and Modbus has no compare-and-swap, so this is a
-        read-modify-write and cannot be made atomic.
-
-        What it can do is read the register **here**, rather than reusing the
-        value from the last poll: that narrows the window in which something
-        else could change another bit from a whole poll interval to one round
-        trip. Keeping it on the component is what makes that possible — a
-        caller working from a polled attribute has already lost the chance.
-
-        Raises ``ValueError`` if the inverter does not report the mode.
-        """
-        await self.async_update(notify=False)
-        current = self.e_lim_ctl_mode
-        if current is None:
-            raise ValueError("the inverter did not report its limit control mode")
-        await self.write("e_lim_ctl_mode", (int(current) & ~mask) | (value & mask))
 
 
 class ExternalProductionMax(Component):

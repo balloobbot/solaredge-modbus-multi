@@ -2,7 +2,7 @@
 
 This branch replaces the integration's hand-rolled pymodbus layer with
 [modbus-connection](https://github.com/home-assistant-libs/modbus-connection)
-4.3.0 on the tmodbus backend. The register map now lives in a Home
+4.4.0 on the tmodbus backend. The register map now lives in a Home
 Assistant-free device library at
 `custom_components/solaredge_modbus_multi/solaredge/`, built on the
 `Component` / `ComponentGroup` model framework, and the entity platforms read
@@ -136,8 +136,8 @@ all are fixed by it.
 ## 2. What internals of modbus-connection did I have to touch?
 
 Very little, which is the headline. Nothing was monkeypatched, no private
-function was called, and no class was reached around. Two things needed more
-than the documented surface:
+function was called, and no class was reached around. One thing needs more
+than the documented surface; a second did until 4.4.0.
 
 **Subclassing `StringField` to override `decode`.** `decode_string()` decodes
 ASCII and strips only _trailing_ NULs, which is what the SunSpec spec describes
@@ -150,14 +150,16 @@ end up in device names and entity unique IDs. `StringField` is public and
 just something every SunSpec library ends up writing.
 (`solaredge/fields.py`, 33 lines.)
 
-**Setting `register_ranges` on component _instances_.** Documented as a class
-attribute, but the value this library needs is only known at runtime: it is
-`SunSpecModel.length + 1` for the model the chain reported. `restrict_fields()`
-assigns it per-instance internally, so instance assignment clearly works, but
-there is no supported API for "place this component at a discovered model and
-constrain it to that model's span". `solaredge/device.py` has a small `_ranged()`
-helper that does the assignment, and its docstring explains why the reads would
-otherwise be wrong.
+**~~Setting `register_ranges` on component _instances_.~~ Fixed in 4.4.0.** Up
+to 4.3.0 every holding-space member of a `ComponentGroup` had to declare
+`register_ranges` if any did, so each SunSpec component had to be given its
+exact span — a value only known at runtime, assigned per instance through a
+`_ranged()` helper that the documented API did not sanction (see §3.1). 4.4.0
+treats a component that declares nothing as standing for the addresses it reads
+by itself, which is what this library wanted all along: the helper is gone,
+nothing assigns `register_ranges` at runtime any more, and only `Battery` —
+whose two halves straddle a hole the device does not map — still declares a map,
+as the class attribute it is documented to be.
 
 That is the entire list. Everything else — `ComponentGroup`, `repeating_group`,
 `scan()`, `SunSpecComponent`, the sunspec point helpers, the typed exception
@@ -180,58 +182,43 @@ things were changed and why.
 
 Ordered by how much they cost this migration.
 
-### 3.1 `ComponentGroup` forces a choice between pooling and not over-reading
+### 3.1 ~~`ComponentGroup` forces a choice between pooling and not over-reading~~ — fixed in 4.4.0
 
-This was the sharpest edge by a distance, and it is a **correctness** problem,
+This was the sharpest edge by a distance, and it was a **correctness** problem,
 not an ergonomics one.
 
-Pooling the inverter's common block and its model into one `ComponentGroup`
-produced a single 121-register read spanning 40002–40122 — because gap-based
-planning happily bridges the 13-register gap between the end of one SunSpec
-model and the start of the next. That read covers 40113, which is one of the
-registers some SolarEdge firmware refuses. On such a device the _entire poll_
-would fail, where the code being replaced only lost one optional sensor. The
-test that caught it is
+Up to 4.3.0, pooling the inverter's common block and its model into one
+`ComponentGroup` produced a single 121-register read spanning 40002–40122 —
+because gap-based planning happily bridges the 13-register gap between the end
+of one SunSpec model and the start of the next. That read covers 40113, which is
+one of the registers some SolarEdge firmware refuses. On such a device the
+_entire poll_ would fail, where the code being replaced only lost one optional
+sensor. The test that caught it is
 `tests/test_device.py::test_a_refused_optional_block_does_not_fail_the_poll`.
 
-The fix is readable ranges, and there the group's rules bite:
+The fix was readable ranges, and there the group's rules bit: constraining _one_
+component meant constraining _all_ of them, each with a span that for a SunSpec
+component is only known at runtime — the `_ranged()` helper this branch used to
+carry.
 
-```text
-every holding-space component in a ComponentGroup must declare register_ranges
-if any does, but some left it unset
-```
+4.4.0 takes the second suggestion made here, that a component saying nothing
+about the map is not _disagreeing_ with one that does: an undeclared component
+now stands for the addresses it reads by itself, and the group plans with no gap
+bridging at all. The planner may still join two components whose claims abut, so
+the common block and the inverter model go out as one 107-register read again —
+but every register in it is one a field asked for, and the 12-register gap in
+front of the vendor event registers is never bridged, which is the property that
+mattered. `_ranged()` is gone, and with it the runtime `register_ranges`
+assignment of §2.
 
-So constraining _one_ component means constraining _all_ of them, and each has
-to be given its exact span — which for a SunSpec component is only known at
-runtime. That is `_ranged()` in `solaredge/device.py`. Once every member
-declares a range, the planner also stops merging across model boundaries
-entirely, so the pooling that motivated the group buys nothing: the poll issues
-one read per SunSpec model, exactly as the old hand-written code did.
+Two related notes are also answered: `restrict_fields()` now composes with a
+group, and restricting a `SunSpecComponent` keeps `model_id`/`model_length` on
+its own so `_verify_read()` cannot be broken by narrowing.
 
-Concretely:
-
-- **The default is unsafe for gapped devices.** A planner that merges across a
-  gap no field occupies is reading registers the library never declared. On a
-  device that answers everything this is merely wasteful; on one that doesn't,
-  it turns a missing optional block into a failed poll. Consider making
-  "never read an address no field claims and no range declares" the default, and
-  gap-bridging the opt-in.
-- **`require_declared` is too coarse.** A component that says nothing about the
-  map is not _disagreeing_ with one that does; it just has no opinion. Treating
-  "unset" as "my declared fields' spans" would let a group mix constrained and
-  unconstrained members without the current error.
-- **Give `SunSpecComponent` its span for free.** It is constructed with a
-  `SunSpecModel` that carries `length`. Defaulting `register_ranges` to
-  `((0, model.length + 1),)` is what every SunSpec device wants, and would have
-  removed `_ranged()` entirely. An optional `last_offset=` for a component that
-  deliberately stops short of the model's end (as the inverter here does, at 39)
-  would cover the rest.
-- **`restrict_fields()` can't be combined with a group**, for the same
-  `require_declared` reason — and it is not obvious that using it on a
-  `SunSpecComponent` requires keeping `model_id` and `model_length` in the kept
-  set or `_verify_read()` starts failing. "This device only serves part of the
-  standard model" is the canonical SunSpec situation; it should compose with
-  pooling.
+Still open, and much smaller now: **give `SunSpecComponent` its span for free.**
+It is constructed with a `SunSpecModel` that carries `length`, so a component
+that wants to be readable across its whole advertised model — rather than only
+where its fields land — still has to say so by hand.
 
 ### 3.2 No per-request timeout
 
@@ -290,18 +277,18 @@ for essentially every inverter. Options on `StringField` — `encoding=`,
 library, and by the survey's account most SunSpec libraries, all end up writing
 independently.
 
-### 3.7 `scan()` throws away chain order, which is meaningful
+### 3.7 ~~`scan()` throws away chain order, which is meaningful~~ — fixed in 4.4.0
 
-`SunSpecModels` is a dict keyed by model ID with a `first()` helper. But a
+`SunSpecModels` was a dict keyed by model ID with a `first()` helper. But a
 SunSpec chain is _ordered_, and on SolarEdge position is load-bearing: meter
 _n_'s identity block is a model 1, and the meter model that belongs to it is the
-next model in the chain, not "the nth model 203". Reconstructing that means
+next model in the chain, not "the nth model 203". Reconstructing that meant
 flattening every list and re-sorting by address — `_chain()` and `_at()` in
 `solaredge/device.py`.
 
-`SunSpecModels.chain` (models in chain order) and `models.at(address)` would
-both be a few lines in the library and would save every multi-model device
-library the same detour.
+4.4.0 adds `SunSpecModels.chain`, `models.at(address)` and `SunSpecModel.span`.
+Both helpers are gone, and the meter-slot shift now reads `mppt_model.span`
+rather than restating "length plus its two header registers" as `length + 2`.
 
 ### 3.8 `scan()` is all-or-nothing on a malformed chain
 
@@ -313,12 +300,12 @@ has no supported shape. `scan(unit, base, on_error="stop")` returning what it
 found, or a public `read_model_header(unit, address)`, would give libraries
 somewhere to land.
 
-### 3.9 No writable bitfield
+### 3.9 ~~No writable bitfield~~ — fixed in 4.4.0
 
 `E_Lim_Ctl_Mode` is one register holding five independent settings, exposed as
 three entities — a select over the three mutually exclusive mode bits, and two
 switches over the independent flags. Changing any of them means writing all
-five back, and there is no field-level way to express that.
+five back, and up to 4.3.0 there was no field-level way to express that.
 
 `ModbusUnit.mask_write_register` (FC 0x16) would make it atomic at the device,
 but **SolarEdge does not implement it**: its _SunSpec Implementation Technical
@@ -328,34 +315,27 @@ Note_ (v3.2, June 2025), Appendix A, documents the main functions as `0x03`,
 
 What that changes is _where_ it belongs. Doing it in the entities means writing
 back the value from the last poll, up to a full scan interval stale — anything
-that touched another bit meanwhile is silently reverted. So this branch puts it
-on the component instead:
+that touched another bit meanwhile is silently reverted. This branch first put
+it on the component, as a `write_mode_bits(mask, value)` helper; 4.4.0's `bit()`
+and `bits()` are that helper, and the block now simply declares what each
+setting owns:
 
 ```python
-async def write_mode_bits(self, mask: int, value: int) -> None:
-    """Replace the bits in ``mask`` with ``value``, leaving the rest alone."""
-    await self.async_update(notify=False)
-    current = self.e_lim_ctl_mode
-    ...
-    await self.write("e_lim_ctl_mode", (int(current) & ~mask) | (value & mask))
+limit_mode = bits(0, 0, 3, writable=True)          # bits 0-2, one selection
+external_production = bit(0, 10, writable=True)    # bit 10
+negative_limit = bit(0, 11, writable=True)         # bit 11
 ```
 
-Re-reading in the write narrows the window from one poll interval to one round
-trip, which is as tight as this device allows — and a caller working from a
-polled attribute has already lost the chance to do it. The select and both
-switches now pass a mask and a value and hold no bit arithmetic of their own.
-
-That helper is deliberately shaped like what the library should offer: a
-writable `flag(register, bit)` field whose `write()` re-reads first, plus a
-`write_flags({...})` that sets several flags of one register in a single write.
-Both halves are needed here, and the datasheet says why. Eleven of the
-register's sixteen bits are **Reserved**, so a write must be masked — the model
-cannot know what is in them. And bits 0-2 carry "Only single selection is
-allowed", so changing the selection has to clear two and set one _in one
-write_; done as three per-flag writes it passes through states the device
-explicitly forbids. Packed flag registers with reserved bits are common enough
-across inverters that this would earn its place —
-[home-assistant-libs/modbus-connection#150](https://github.com/home-assistant-libs/modbus-connection/issues/150).
+A write to any of them re-reads the register and merges, which narrows the
+window from one poll interval to one round trip — as tight as this device
+allows. Both halves the datasheet asks for are there. Eleven of the register's
+sixteen bits are **Reserved**, so the write is masked and leaves them alone. And
+bits 0-2 carry "Only single selection is allowed", so `bits(0, 0, 3)` covers the
+whole run and changing the selection clears two and sets one _in one write_,
+never passing through a state the device forbids — which three separate
+single-bit fields would have done. The select and both switches now write a
+field by name and hold no bit arithmetic at all
+([home-assistant-libs/modbus-connection#150](https://github.com/home-assistant-libs/modbus-connection/issues/150)).
 
 ### 3.10 Smaller things
 
@@ -406,3 +386,22 @@ needed a workaround:
   checkable. `read_events` in particular made the §3.1 over-reading bug visible
   as an assertion about block boundaries rather than a field report from someone
   with the wrong firmware.
+- `bit()` and `bits()` (4.4.0) put the packed-register read-modify-write in the
+  library, where it belongs; see §3.9.
+
+## What the 4.3.0 → 4.4.0 bump changed here
+
+- `_ranged()` in `solaredge/device.py` is gone: an undeclared component now
+  stands for what it reads by itself, so nothing assigns `register_ranges` at
+  runtime any more (§2, §3.1). That also removes a hazard the new planner
+  introduced — a readable range derived from a model's advertised `length` is
+  now checked against the fields inside it, and a device reporting a length
+  short of its own last point would have failed the plan outright.
+- `_chain()` and `_at()` are gone in favour of `SunSpecModels.chain` /
+  `.at()`, and the meter-slot arithmetic uses `SunSpecModel.span` (§3.7).
+- `SiteLimit.write_mode_bits()` is gone in favour of `bit()` / `bits()` fields;
+  the select and the two switches write a named field (§3.9).
+- Nothing else needed changing: the repo never imported the removed
+  `ModbusParams` alias, already raised and caught the typed exception classes
+  rather than branching on `.exception_code`, and already used `disconnect()`,
+  `nan=`, `declared_fields`, `read_events` and `fail_read` with typed errors.

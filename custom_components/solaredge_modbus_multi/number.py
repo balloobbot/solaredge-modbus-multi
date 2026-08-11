@@ -330,9 +330,13 @@ class SolarEdgeSiteLimitNumber(SolarEdgeNumberBase):
         return self._platform.site_limit
 
     @property
-    def _mode(self) -> int | None:
-        block = self._platform.site_limit
-        return None if block is None else block.e_lim_ctl_mode
+    def _limit_control(self):
+        """The site limit block, whose mode bits say which numbers apply.
+
+        Not the same as ``block``: a subclass may read its value from another
+        block entirely, but every one of them is gated on this one's mode.
+        """
+        return self._platform.site_limit
 
 
 class SolarEdgeSiteLimit(SolarEdgeSiteLimitNumber):
@@ -353,12 +357,12 @@ class SolarEdgeSiteLimit(SolarEdgeSiteLimitNumber):
 
     @property
     def available(self) -> bool:
-        mode = self._mode
-        if self._value is None or mode is None:
+        limit_control = self._limit_control
+        if self._value is None or limit_control is None:
             return False
 
         # Only meaningful while one of the three limiting modes is selected.
-        return super().available and bool(int(mode) & 0b111)
+        return super().available and bool(limit_control.limit_mode)
 
     @property
     def native_value(self) -> int:
@@ -392,11 +396,11 @@ class SolarEdgeExternalProductionMax(SolarEdgeSiteLimitNumber):
     @property
     def available(self) -> bool:
         value = self._value
-        mode = self._mode
-        if value is None or value < 0 or mode is None:
+        limit_control = self._limit_control
+        if value is None or value < 0 or limit_control is None:
             return False
 
-        return super().available and bool((int(mode) >> 10) & 1)
+        return super().available and bool(limit_control.external_production)
 
     @property
     def entity_registry_enabled_default(self) -> bool:

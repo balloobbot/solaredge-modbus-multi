@@ -13,7 +13,6 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN
-from .solaredge import SiteLimit
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -82,33 +81,32 @@ class SolarEdgeSwitchBase(CoordinatorEntity, SwitchEntity):
 class SolarEdgeLimitControlModeBit(SolarEdgeSwitchBase):
     """One bit of the site limit control mode word.
 
-    That register packs five independent options, so flipping one is a
-    read-modify-write of the whole word. The component owns that, because it is
-    the only place that can re-read the register immediately before writing it
-    instead of reusing the last polled value.
+    That register packs five independent options, so the field is declared as
+    the single bit it owns and the write re-reads the register and merges,
+    leaving the other options alone.
     """
 
     entity_category = EntityCategory.CONFIG
 
-    _mask: int
+    _field: str
 
     @property
-    def _mode(self) -> int | None:
+    def _bit(self) -> bool | None:
         block = self._platform.site_limit
-        return None if block is None else block.e_lim_ctl_mode
+        return None if block is None else getattr(block, self._field)
 
     @property
     def available(self) -> bool:
-        return super().available and self._mode is not None
+        return super().available and self._bit is not None
 
     @property
     def is_on(self) -> bool:
-        return bool(int(self._mode) & self._mask)
+        return bool(self._bit)
 
     async def _async_set_bit(self, on: bool) -> None:
-        _LOGGER.debug(f"set {self.unique_id} mask {self._mask:#06x} to {int(on)}")
+        _LOGGER.debug(f"set {self.unique_id} to {int(on)}")
 
-        await self._platform.async_write_mode_bits(self._mask, self._mask if on else 0)
+        await self._platform.async_write(self._platform.site_limit, self._field, on)
         await self.async_update()
 
     async def async_turn_on(self, **kwargs: Any) -> None:
@@ -123,7 +121,7 @@ class SolarEdgeLimitControlModeBit(SolarEdgeSwitchBase):
 class SolarEdgeExternalProduction(SolarEdgeLimitControlModeBit):
     """External Production switch. Indicates a non-SolarEdge power sorce in system."""
 
-    _mask = SiteLimit.EXTERNAL_PRODUCTION_BIT
+    _field = "external_production"
 
     @property
     def unique_id(self) -> str:
@@ -141,7 +139,7 @@ class SolarEdgeExternalProduction(SolarEdgeLimitControlModeBit):
 class SolarEdgeNegativeSiteLimit(SolarEdgeLimitControlModeBit):
     """Negative Site Limit switch. Sets minimum import power when enabled."""
 
-    _mask = SiteLimit.NEGATIVE_LIMIT_BIT
+    _field = "negative_limit"
 
     @property
     def unique_id(self) -> str:
