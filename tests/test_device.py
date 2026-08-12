@@ -82,21 +82,25 @@ async def test_mppt_modules_are_sized_from_the_device(mock_modbus_unit, units) -
 
     device = SolarEdgeDevice(mock_modbus_unit, 1)
     await device.async_setup()
-    await device.async_update()
 
-    assert device.mppt is not None
-    assert device.mppt.n == units
-    assert len(device.mppt.module) == units
+    # The first poll sizes the group; from the second on, the modules read
+    # from the component's own folded plan. Both must decode the same.
+    for _ in range(2):
+        await device.async_update()
 
-    first, second = device.mppt.module[0], device.mppt.module[1]
-    assert first.id == 1
-    assert first.id_str == "String 1"
-    # Every module scales off the shared factors in model 160's fixed block,
-    # so DCA_SF = -2 applies to each module's own raw current.
-    assert first.dca == pytest.approx(4.45)
-    assert second.dca == pytest.approx(4.46)
-    assert first.dcv == pytest.approx(380.1)
-    assert first.dcw == 2740
+        assert device.mppt is not None
+        assert device.mppt.n == units
+        assert len(device.mppt.module) == units
+
+        first, second = device.mppt.module[0], device.mppt.module[1]
+        assert first.id == 1
+        assert first.id_str == "String 1"
+        # Every module scales off the shared factors in model 160's fixed
+        # block, so DCA_SF = -2 applies to each module's own raw current.
+        assert first.dca == pytest.approx(4.45)
+        assert second.dca == pytest.approx(4.46)
+        assert first.dcv == pytest.approx(380.1)
+        assert first.dcw == 2740
 
 
 async def test_batteries_are_probed_and_empty_slots_dropped(mock_modbus_unit) -> None:
@@ -236,17 +240,21 @@ async def test_no_pooled_read_reaches_the_vendor_event_registers(
     await device.async_setup()
     await device.async_add_batteries()
 
-    mock_modbus_unit.read_events.clear()
-    await device.async_update()
+    # The steady-state poll runs a wider plan than the first — the MPPT
+    # modules fold into model 160's own run once the count is known — so the
+    # gap has to survive both plans.
+    for _ in range(2):
+        mock_modbus_unit.read_events.clear()
+        await device.async_update()
 
-    for address in (40113, 40119):
-        covering = [
-            (event.address, event.count)
-            for event in mock_modbus_unit.read_events
-            if event.address <= address < event.address + event.count
-        ]
-        # Only the optional block's own two-register read reaches it.
-        assert covering == [(address, 2)]
+        for address in (40113, 40119):
+            covering = [
+                (event.address, event.count)
+                for event in mock_modbus_unit.read_events
+                if event.address <= address < event.address + event.count
+            ]
+            # Only the optional block's own two-register read reaches it.
+            assert covering == [(address, 2)]
 
 
 async def test_raw_read_covers_the_optional_blocks(mock_modbus_unit) -> None:
