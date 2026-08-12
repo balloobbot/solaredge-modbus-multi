@@ -1,2 +1,2 @@
-modbus-connection[tmodbus]>=4.6.0
+modbus-connection[tmodbus]>=4.6.1
 awesomeversion>=25.5.0
