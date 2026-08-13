@@ -278,13 +278,16 @@ class SolarEdgeCoordinator(TimestampDataUpdateCoordinator):
             # The device moved them, so setup has to run again to rescan.
             _LOGGER.warning("SunSpec map shifted, reloading: %s", e)
             self.hass.config_entries.async_schedule_reload(self.config_entry.entry_id)
-            raise UpdateFailed(f"{e}")
+            raise UpdateFailed(f"{e}") from e
 
         except HubInitFailed as e:
-            raise UpdateFailed(f"{e}")
+            raise UpdateFailed(f"{e}") from e
 
+        # Chained rather than bare: Home Assistant logs the message at error
+        # level and the traceback at debug, which is where the errors that
+        # failed each device are.
         except DataUpdateFailed as e:
-            raise UpdateFailed(f"{e}")
+            raise UpdateFailed(f"{e}") from e
 
     async def _refresh_modbus_data_with_retry(
         self,

@@ -114,9 +114,11 @@ async def _build_hub(unit, **options) -> StubHub:
     device = SolarEdgeDevice(unit, 1, SolarEdgeOptions(**options))
     await device.async_setup()
     await device.async_add_batteries()
-    await device.async_update()
 
+    # Polled through the wrapper, and after it is built, exactly as the hub
+    # does it: the report the wrapper keeps is what the entities read.
     inverter = SolarEdgeInverter(1, hub, device)
+    await inverter.async_update()
     hub.inverters.append(inverter)
     for meter in device.meters:
         hub.meters.append(SolarEdgeMeter(hub, inverter, meter))
@@ -134,6 +136,18 @@ async def _entities_for(hub, *modules):
     for module in modules:
         await module.async_setup_entry(hass, StubConfigEntry(), created.extend)
     return created
+
+
+def _process_totals(entities) -> None:
+    """Push a finished poll into the totals, as a coordinator update would.
+
+    A total holds its value in ``_attr_native_value`` rather than reading the
+    model on demand, so nothing reaches it until the coordinator fires. These
+    entities are never added to Home Assistant, so the call is made here.
+    """
+    for entity in entities:
+        if isinstance(entity, sensor.SolarEdgeTotalBase):
+            entity._process_data()
 
 
 def _read_everything(entity) -> dict:
@@ -296,6 +310,10 @@ async def test_diagnostics_carry_decoded_values_and_raw_registers(
     assert registers["40002"] == 1  # the common model header
     assert inverter["optional_blocks"]["grid_status"] is True
 
+    # Which device stopped answering is the other half of a bug report.
+    assert "meter_1" in inverter["last_poll"]["updated"]
+    assert inverter["last_poll"]["failed"] == {}
+
     # Serial numbers are redacted; the values that identify a fault are not.
     assert data["meter_id_1"]["common"]["sn"] == "**REDACTED**"
 
@@ -383,7 +401,7 @@ async def test_a_failed_meter_takes_only_its_own_entities_unavailable(
     # the device, and the energy totals, which hold their last value so that a
     # device dropping out does not gap long-term statistics.
     kept = {f"{meter_uid}_last_update_timestamp"} | {
-        e.unique_id for e in meter_entities if getattr(e, "always_available", False)
+        e.unique_id for e in meter_entities if getattr(e, "is_total", False)
     }
     assert lost == {e.unique_id for e in meter_entities} - kept
     assert hub.inverters[0].online and hub.batteries[0].online
@@ -406,6 +424,7 @@ async def test_energy_totals_survive_an_inverter_that_stopped_answering(
 
     hub = await _build_hub(mock_modbus_unit, detect_meters=True)
     entities = await _entities_for(hub, sensor)
+    _process_totals(entities)
 
     totals = [e for e in entities if e.state_class == SensorStateClass.TOTAL_INCREASING]
     live = [e for e in entities if e.state_class == SensorStateClass.MEASUREMENT]
@@ -439,6 +458,7 @@ async def test_a_total_holds_its_last_value_when_a_good_poll_gates_it(
 
     hub = await _build_hub(mock_modbus_unit, detect_batteries=True)
     entities = await _entities_for(hub, sensor)
+    _process_totals(entities)
     by_id = {e.unique_id: e for e in entities}
 
     lifetime = by_id[f"{hub.inverters[0].uid_base}_ac_energy_kwh"]
@@ -449,6 +469,44 @@ async def test_a_total_holds_its_last_value_when_a_good_poll_gates_it(
     mock_modbus_unit.holding[40093] = u32(9_000)  # inverter WH, gone backwards
     mock_modbus_unit.holding[57718] = u64(0, little=True)  # battery in standby
     await hub.inverters[0].async_update()
+    _process_totals(entities)
 
     assert lifetime.available and lifetime.native_value == 12345678
     assert export.available and export.native_value == 4_000_000
+
+
+async def test_an_accepted_battery_reset_publishes_the_new_total(
+    mock_modbus_unit,
+) -> None:
+    """A replaced battery starts counting again, without a gap on the way.
+
+    The reset is only accepted once the counter has stayed low for the
+    configured number of polls. Neither the waiting nor the acceptance may
+    publish unknown, which would break statistics as badly as unavailable.
+    """
+    from .fixtures import u64
+
+    seed_inverter(mock_modbus_unit)
+    seed_battery(mock_modbus_unit, battery_id=1)
+
+    hub = await _build_hub(mock_modbus_unit, detect_batteries=True)
+    hub.allow_battery_energy_reset = True
+    hub.battery_energy_reset_cycles = 1
+    entities = await _entities_for(hub, sensor)
+    _process_totals(entities)
+
+    export = next(
+        e
+        for e in entities
+        if e.unique_id == f"{hub.batteries[0].uid_base}_energy_export"
+    )
+    assert export.native_value == 4_000_000
+
+    mock_modbus_unit.holding[57718] = u64(1_000, little=True)  # a new battery
+    await hub.inverters[0].async_update()
+    _process_totals(entities)
+    assert export.native_value == 4_000_000  # one cycle short of a reset
+
+    await hub.inverters[0].async_update()
+    _process_totals(entities)
+    assert export.native_value == 1_000

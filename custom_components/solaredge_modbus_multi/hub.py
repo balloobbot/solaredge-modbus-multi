@@ -51,6 +51,7 @@ from .solaredge import (
     MeterDevice,
     SolarEdgeDevice,
     SolarEdgeOptions,
+    UpdateReport,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -265,10 +266,7 @@ class SolarEdgeModbusMultiHub:
                 self.batteries.append(new_battery)
                 _LOGGER.debug(f"Found I{unit_id}B{battery.battery_id}")
 
-        for inverter in self.inverters:
-            await inverter.async_update()
-        for evse in self.evses:
-            await evse.async_update()
+        await self._async_poll_devices()
 
         # After the poll: a meter's serial is only known once its identity
         # block has been read.
@@ -333,10 +331,7 @@ class SolarEdgeModbusMultiHub:
 
         try:
             async with asyncio.timeout(self.coordinator_timeout):
-                for inverter in self.inverters:
-                    await inverter.async_update()
-                for evse in self.evses:
-                    await evse.async_update()
+                await self._async_poll_devices()
 
         except SunSpecMapShiftError as e:
             # The device rearranged its model chain, so every component is at a
@@ -386,6 +381,26 @@ class SolarEdgeModbusMultiHub:
             await self.disconnect()
 
         return True
+
+    async def _async_poll_devices(self) -> None:
+        """Poll every device on the link, and fail only if none of them answered.
+
+        A device that goes quiet keeps its own entities unavailable and leaves
+        the rest of the link alone, so the update itself only fails when
+        nothing came back at all — and then it carries one of the errors, since
+        Home Assistant shows the user the message and nothing else.
+        """
+        reports = [await inverter.async_update() for inverter in self.inverters]
+        reports += [await evse.async_update() for evse in self.evses]
+
+        if any(report.updated for report in reports):
+            return
+        errors = [err for report in reports for err in report.failed.values()]
+        if not errors:
+            return
+        raise DataUpdateFailed(f"Nothing answered: {errors[0]}") from ExceptionGroup(
+            "every device failed", errors
+        )
 
     def _raise_issues_for_slow_blocks(self) -> None:
         """Warn about optional blocks the inverter was too slow to answer.
@@ -601,8 +616,9 @@ class SolarEdgeInverter:
         self.device = device
         self.has_parent = False
         self.mmppt_units: list[SolarEdgeMMPPTUnit] = []
+        self.report: UpdateReport | None = None
         self._use_status_vendor4 = False
-        self._failed: dict[str, ModbusError] = {}
+        self._failed: frozenset[str] = frozenset()  # what was warned about last
 
         self.manufacturer = device.common.mn
         self.model = device.common.md
@@ -628,21 +644,19 @@ class SolarEdgeInverter:
                 for index in range(int(device.mppt.n or 0))
             ]
 
-    async def async_update(self) -> None:
+    async def async_update(self) -> UpdateReport:
         """Refresh this inverter and everything behind it."""
-        report = await self.device.async_update()
-        if set(report.failed) != set(self._failed):
-            if report.failed:
-                what = ", ".join(
-                    f"{name} ({err})" for name, err in sorted(report.failed.items())
-                )
-                _LOGGER.warning(
-                    f"I{self.inverter_unit_id}: keeping previous values for {what}"
-                )
-            else:
-                _LOGGER.info(f"I{self.inverter_unit_id}: everything answered again")
-        self._failed = report.failed
+        self.report = await self.device.async_update()
+        for name in sorted(self.report.failed.keys() - self._failed):
+            _LOGGER.warning(
+                "Failed to fetch I%s %s: %s",
+                self.inverter_unit_id,
+                name,
+                self.report.failed[name],
+            )
+        self._failed = frozenset(self.report.failed)
         self._resize_mmppt_units()
+        return self.report
 
     def refreshed(self, name: str) -> bool:
         """Whether the last poll refreshed one of the devices behind this unit.
@@ -653,7 +667,7 @@ class SolarEdgeInverter:
         the energy totals, which hold their last value to keep long-term
         statistics unbroken.
         """
-        return name not in self._failed
+        return self.report is None or name not in self.report.failed
 
     def _resize_mmppt_units(self) -> None:
         """Track a module count that changed between polls.
@@ -984,10 +998,11 @@ class SolarEdgeEVSE:
         self.uid_base = f"{self.model}_{self.serial}"
         self._answered = True
 
-    async def async_update(self) -> None:
+    async def async_update(self) -> UpdateReport:
         """Refresh the identity block, which is where the firmware version is."""
         report = await self.device.async_update()
         self._answered = report.complete
+        return report
 
     @property
     def common(self):

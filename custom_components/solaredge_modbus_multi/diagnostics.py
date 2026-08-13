@@ -39,6 +39,21 @@ def _component_values(component: Any) -> dict[str, Any]:
     return {name: getattr(component, name) for name in component.declared_fields}
 
 
+def _last_poll(inverter: Any) -> dict[str, Any]:
+    """What the last poll refreshed, and what it did not.
+
+    Which device stopped answering is the first thing an issue report needs,
+    and the register map below only shows what answers now.
+    """
+    report = inverter.report
+    if report is None:
+        return {}
+    return {
+        "updated": sorted(report.updated),
+        "failed": {name: str(err) for name, err in report.failed.items()},
+    }
+
+
 def _device_info(device: Any) -> dict[str, Any]:
     """The device registry entry, as plain data."""
     return dict(device.device_info)
@@ -63,6 +78,7 @@ async def async_get_config_entry_diagnostics(
             "is_mmppt": inverter.is_mmppt,
             "use_status_vendor4": inverter.use_status_vendor4,
             "has_battery": inverter.has_battery,
+            "last_poll": _last_poll(inverter),
             "optional_blocks": {
                 name: inverter.device.has_block(name)
                 for name in (

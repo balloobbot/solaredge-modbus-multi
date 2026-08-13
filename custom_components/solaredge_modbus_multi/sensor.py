@@ -6,6 +6,7 @@ import re
 
 from awesomeversion import AwesomeVersion
 from homeassistant.components.sensor import (
+    RestoreSensor,
     SensorDeviceClass,
     SensorEntity,
     SensorStateClass,
@@ -347,12 +348,8 @@ class SolarEdgeSensorBase(CoordinatorEntity, SensorEntity):
         return self._config_entry.data["name"]
 
     @property
-    def always_available(self) -> bool:
-        """Whether this sensor keeps its value when the device stops answering.
-
-        Defaults to true for the statistics classes and can be set explicitly
-        by a subclass.
-        """
+    def is_total(self) -> bool:
+        """Whether this sensor accumulates rather than measures."""
         return self.state_class in (
             SensorStateClass.TOTAL,
             SensorStateClass.TOTAL_INCREASING,
@@ -366,14 +363,37 @@ class SolarEdgeSensorBase(CoordinatorEntity, SensorEntity):
         # failed its poll or nothing answered at all. The trade is that they
         # never read unavailable, even for an inverter that is gone for good;
         # reporting that is the connectivity and diagnostic entities' job.
-        if self.always_available:
-            return True
-
-        return super().available and self._platform.online
+        return self.is_total or (super().available and self._platform.online)
 
     @callback
     def _handle_coordinator_update(self) -> None:
         self.async_write_ha_state()
+
+
+class SolarEdgeTotalBase(SolarEdgeSensorBase, RestoreSensor):
+    """A lifetime counter, which never publishes an empty reading.
+
+    The value lives in ``_attr_native_value``: a poll that has nothing to
+    publish leaves it alone rather than writing ``None``, which would show as
+    unknown and gap long-term statistics as badly as unavailable does. A
+    SolarEdge inverter powers down every night, so the same value is restored
+    across a Home Assistant restart.
+    """
+
+    async def async_added_to_hass(self) -> None:
+        await super().async_added_to_hass()
+        if (last_data := await self.async_get_last_sensor_data()) is not None:
+            self._attr_native_value = last_data.native_value
+        self._process_data()
+
+    @callback
+    def _handle_coordinator_update(self) -> None:
+        self._process_data()
+        super()._handle_coordinator_update()
+
+    def _process_data(self) -> None:
+        """Publish what this poll returned, or keep the last total."""
+        raise NotImplementedError
 
 
 class SolarEdgeDevice(SolarEdgeSensorBase):
@@ -753,7 +773,7 @@ class ACPowerFactor(SolarEdgeSensorBase):
         return _precision(self.block.pf_sf)
 
 
-class SolarEdgeAccumulatorBase(SolarEdgeSensorBase):
+class SolarEdgeAccumulatorBase(SolarEdgeTotalBase):
     """A TOTAL_INCREASING sensor over a SunSpec accumulator.
 
     SolarEdge accumulators have been seen going backwards, which Home Assistant
@@ -766,7 +786,6 @@ class SolarEdgeAccumulatorBase(SolarEdgeSensorBase):
         super().__init__(platform, config_entry, coordinator)
 
         self._phase = phase
-        self._last = None
         self._log_once = False
 
     @property
@@ -788,34 +807,24 @@ class SolarEdgeAccumulatorBase(SolarEdgeSensorBase):
         """The counter as the device last reported it, or None if unimplemented."""
         return getattr(self.block, self._field)
 
-    @property
-    def available(self) -> bool:
-        # Available as soon as there is anything to publish, and from then on
-        # for good: a missing or backwards reading is handled by holding the
-        # last total rather than by disappearing.
-        return self._current is not None or self._last is not None
-
-    @property
-    def native_value(self):
+    def _process_data(self) -> None:
         value = self._current
+        last = self._attr_native_value
 
-        # Publishing None here would set the state to unknown, which gaps
-        # long-term statistics exactly as unavailable does.
         if value is None:
-            return self._last
+            return
 
-        if self._last is not None and value < self._last:
+        if last is not None and value < last:
             if not self._log_once:
                 _LOGGER.warning(
                     "Accumulator went backwards; this is a SolarEdge bug: "
-                    f"{self._field} {value} < {self._last}"
+                    f"{self._field} {value} < {last}"
                 )
                 self._log_once = True
-            return self._last
+            return
 
         self._log_once = False
-        self._last = value
-        return value
+        self._attr_native_value = value
 
 
 class SolarEdgeACEnergy(SolarEdgeAccumulatorBase):
@@ -1579,7 +1588,7 @@ class SolarEdgeBatteryPowerInverted(SolarEdgeBatteryPower):
         return -value
 
 
-class SolarEdgeBatteryEnergyBase(SolarEdgeSensorBase):
+class SolarEdgeBatteryEnergyBase(SolarEdgeTotalBase):
     """A battery lifetime energy counter.
 
     SolarEdge resets these to zero when a battery is replaced or its firmware
@@ -1597,58 +1606,50 @@ class SolarEdgeBatteryEnergyBase(SolarEdgeSensorBase):
     def __init__(self, platform, config_entry, coordinator):
         super().__init__(platform, config_entry, coordinator)
 
-        self._last = None
         self._count = 0
         self._log_once = None
 
-    @property
-    def native_value(self):
+    def _process_data(self) -> None:
         value = getattr(self.block, self._field)
+        last = self._attr_native_value
 
-        # Every gate below holds the last total instead of publishing None:
-        # the poll succeeded, so None would show as unknown and gap long-term
-        # statistics. The gates themselves stay — a battery reporting 0 from
-        # standby would read as a counter reset, which is worse than a stale
-        # total.
+        # Every gate below keeps the last total. The gates themselves stay — a
+        # battery reporting 0 from standby would read as a counter reset, which
+        # is worse than a stale total.
         if value is None or value == 0xFFFFFFFFFFFFFFFF:
-            return self._last
+            return
 
         if value == 0 and not self._platform.allow_battery_energy_reset:
-            return self._last
+            return
 
-        if self._last is None:
-            self._last = 0
-
-        if value >= self._last:
-            self._last = value
+        if last is None or value >= last:
+            self._attr_native_value = value
             self._log_once = False
-            if self._platform.allow_battery_energy_reset:
-                self._count = 0
-            return value
+            self._count = 0
+            return
 
-        if not self._platform.allow_battery_energy_reset and not self._log_once:
-            _LOGGER.warning(
-                f"Battery {self._label} went backwards: Current value "
-                f"{value} is less than last value of {self._last}"
-            )
-            self._log_once = True
+        if not self._platform.allow_battery_energy_reset:
+            if not self._log_once:
+                _LOGGER.warning(
+                    f"Battery {self._label} went backwards: Current value "
+                    f"{value} is less than last value of {last}"
+                )
+                self._log_once = True
+            return
 
-        if self._platform.allow_battery_energy_reset:
-            self._count += 1
-            _LOGGER.debug(
-                f"{self._field} went backwards: {value} < {self._last} "
-                f"cycle {self._count} of "
-                f"{self._platform.battery_energy_reset_cycles}"
-            )
+        self._count += 1
+        _LOGGER.debug(
+            f"{self._field} went backwards: {value} < {last} "
+            f"cycle {self._count} of "
+            f"{self._platform.battery_energy_reset_cycles}"
+        )
 
-            if self._count > self._platform.battery_energy_reset_cycles:
-                _LOGGER.debug(f"{self._field} reset at cycle {self._count}")
-                self._last = None
-                self._count = 0
-
-        # Backwards: hold the last total. Once a reset has been accepted there
-        # is nothing left to hold and the next poll starts the counter again.
-        return self._last
+        # A counter that has stayed low for long enough is a real reset, so
+        # the new total is published rather than held.
+        if self._count > self._platform.battery_energy_reset_cycles:
+            _LOGGER.debug(f"{self._field} reset at cycle {self._count}")
+            self._attr_native_value = value
+            self._count = 0
 
 
 class SolarEdgeBatteryEnergyExport(SolarEdgeBatteryEnergyBase):
