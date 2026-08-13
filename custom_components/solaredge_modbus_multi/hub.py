@@ -265,12 +265,14 @@ class SolarEdgeModbusMultiHub:
                 self.batteries.append(new_battery)
                 _LOGGER.debug(f"Found I{unit_id}B{battery.battery_id}")
 
-        self._warn_duplicate_meter_serials()
-
         for inverter in self.inverters:
             await inverter.async_update()
         for evse in self.evses:
             await evse.async_update()
+
+        # After the poll: a meter's serial is only known once its identity
+        # block has been read.
+        self._warn_duplicate_meter_serials()
 
         self.initalized = True
 
@@ -819,16 +821,37 @@ class SolarEdgeMeter:
         self.device = meter
         self.has_parent = True
 
-        self.manufacturer = meter.common.mn
-        self.model = meter.common.md
-        self.option = meter.common.opt
-        self.fw_version = meter.common.vr
-        self.serial = meter.common.sn
-        self.device_address = meter.common.da
         self.name = (
             f"{hub.hub_id.capitalize()} I{self.inverter_unit_id} M{self.meter_id}"
         )
         self.uid_base = f"{inverter.uid_base}_M{self.meter_id}"
+
+    # Read live rather than captured in __init__: a meter's identity block is
+    # only filled in by the first poll, which happens after the hub has built
+    # its wrappers.
+    @property
+    def manufacturer(self):
+        return self.common.mn
+
+    @property
+    def model(self):
+        return self.common.md
+
+    @property
+    def option(self):
+        return self.common.opt
+
+    @property
+    def fw_version(self):
+        return self.common.vr
+
+    @property
+    def serial(self):
+        return self.common.sn
+
+    @property
+    def device_address(self):
+        return self.common.da
 
     @property
     def tag(self) -> str:
