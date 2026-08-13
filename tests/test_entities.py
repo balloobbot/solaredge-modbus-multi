@@ -16,6 +16,7 @@ import pytest
 
 pytest.importorskip("homeassistant")
 
+from homeassistant.components.sensor import SensorStateClass  # noqa: E402
 from solaredge_modbus_multi import (  # noqa: E402
     binary_sensor,
     button,
@@ -379,9 +380,75 @@ async def test_a_failed_meter_takes_only_its_own_entities_unavailable(
     lost = {uid for uid, was in before.items() if was and not after[uid]}
     # Everything the failure took belonged to the meter, and it took all of it
     # bar the Last Update diagnostic, which reports the coordinator rather than
-    # the device and is available by design.
-    assert lost == {e.unique_id for e in meter_entities} - {
-        f"{meter_uid}_last_update_timestamp"
+    # the device, and the energy totals, which hold their last value so that a
+    # device dropping out does not gap long-term statistics.
+    kept = {f"{meter_uid}_last_update_timestamp"} | {
+        e.unique_id for e in meter_entities if getattr(e, "always_available", False)
     }
+    assert lost == {e.unique_id for e in meter_entities} - kept
     assert hub.inverters[0].online and hub.batteries[0].online
     assert not hub.meters[0].online
+
+
+async def test_energy_totals_survive_an_inverter_that_stopped_answering(
+    mock_modbus_unit,
+) -> None:
+    """The nightly powerdown, which is the case that damages statistics.
+
+    A SolarEdge inverter powers down every night and takes the link with it,
+    so nothing answers and the coordinator itself fails — not just one device.
+    Instantaneous readings go unavailable, but the lifetime counters have to
+    hold their last value: an unavailable total-increasing sensor puts a gap
+    in long-term statistics and the energy dashboard.
+    """
+    seed_inverter(mock_modbus_unit)
+    seed_meter(mock_modbus_unit, meter_id=1)
+
+    hub = await _build_hub(mock_modbus_unit, detect_meters=True)
+    entities = await _entities_for(hub, sensor)
+
+    totals = [e for e in entities if e.state_class == SensorStateClass.TOTAL_INCREASING]
+    live = [e for e in entities if e.state_class == SensorStateClass.MEASUREMENT]
+    assert totals and live
+    before = {e.unique_id: e.native_value for e in totals}
+
+    # Everything is gone: no device refreshed and the coordinator update failed.
+    hub.online = False
+    entities[0].coordinator.last_update_success = False
+
+    assert not any(e.available for e in live)
+    assert all(e.available for e in totals)
+    assert {e.unique_id: e.native_value for e in totals} == before
+
+
+async def test_a_total_holds_its_last_value_when_a_good_poll_gates_it(
+    mock_modbus_unit,
+) -> None:
+    """A successful poll can gap statistics too, by publishing unknown.
+
+    The device keeps answering but the value is one the sensor refuses to
+    publish: the inverter's lifetime counter jumps backwards, and the battery
+    reports zero from standby. Both gates stay — republishing either would
+    read as a counter reset — but the sensors now hold their last total
+    instead of going unknown, which breaks statistics just as badly.
+    """
+    from .fixtures import u32, u64
+
+    seed_inverter(mock_modbus_unit)
+    seed_battery(mock_modbus_unit, battery_id=1)
+
+    hub = await _build_hub(mock_modbus_unit, detect_batteries=True)
+    entities = await _entities_for(hub, sensor)
+    by_id = {e.unique_id: e for e in entities}
+
+    lifetime = by_id[f"{hub.inverters[0].uid_base}_ac_energy_kwh"]
+    export = by_id[f"{hub.batteries[0].uid_base}_energy_export"]
+    assert lifetime.native_value == 12345678
+    assert export.native_value == 4_000_000
+
+    mock_modbus_unit.holding[40093] = u32(9_000)  # inverter WH, gone backwards
+    mock_modbus_unit.holding[57718] = u64(0, little=True)  # battery in standby
+    await hub.inverters[0].async_update()
+
+    assert lifetime.available and lifetime.native_value == 12345678
+    assert export.available and export.native_value == 4_000_000

@@ -347,7 +347,28 @@ class SolarEdgeSensorBase(CoordinatorEntity, SensorEntity):
         return self._config_entry.data["name"]
 
     @property
+    def always_available(self) -> bool:
+        """Whether this sensor keeps its value when the device stops answering.
+
+        Defaults to true for the statistics classes and can be set explicitly
+        by a subclass.
+        """
+        return self.state_class in (
+            SensorStateClass.TOTAL,
+            SensorStateClass.TOTAL_INCREASING,
+        )
+
+    @property
     def available(self) -> bool:
+        # A total that goes unavailable leaves a gap in long-term statistics
+        # and the energy dashboard, and a SolarEdge inverter powers down every
+        # night, so totals hold their last value instead — whether one device
+        # failed its poll or nothing answered at all. The trade is that they
+        # never read unavailable, even for an inverter that is gone for good;
+        # reporting that is the connectivity and diagnostic entities' job.
+        if self.always_available:
+            return True
+
         return super().available and self._platform.online
 
     @callback
@@ -769,9 +790,19 @@ class SolarEdgeAccumulatorBase(SolarEdgeSensorBase):
 
     @property
     def available(self) -> bool:
+        # Available as soon as there is anything to publish, and from then on
+        # for good: a missing or backwards reading is handled by holding the
+        # last total rather than by disappearing.
+        return self._current is not None or self._last is not None
+
+    @property
+    def native_value(self):
         value = self._current
+
+        # Publishing None here would set the state to unknown, which gaps
+        # long-term statistics exactly as unavailable does.
         if value is None:
-            return False
+            return self._last
 
         if self._last is not None and value < self._last:
             if not self._log_once:
@@ -780,16 +811,10 @@ class SolarEdgeAccumulatorBase(SolarEdgeSensorBase):
                     f"{self._field} {value} < {self._last}"
                 )
                 self._log_once = True
-            return False
+            return self._last
 
         self._log_once = False
-        return super().available
-
-    @property
-    def native_value(self):
-        value = self._current
-        if value is not None:
-            self._last = value
+        self._last = value
         return value
 
 
@@ -1580,11 +1605,16 @@ class SolarEdgeBatteryEnergyBase(SolarEdgeSensorBase):
     def native_value(self):
         value = getattr(self.block, self._field)
 
+        # Every gate below holds the last total instead of publishing None:
+        # the poll succeeded, so None would show as unknown and gap long-term
+        # statistics. The gates themselves stay — a battery reporting 0 from
+        # standby would read as a counter reset, which is worse than a stale
+        # total.
         if value is None or value == 0xFFFFFFFFFFFFFFFF:
-            return None
+            return self._last
 
         if value == 0 and not self._platform.allow_battery_energy_reset:
-            return None
+            return self._last
 
         if self._last is None:
             self._last = 0
@@ -1616,7 +1646,9 @@ class SolarEdgeBatteryEnergyBase(SolarEdgeSensorBase):
                 self._last = None
                 self._count = 0
 
-        return None
+        # Backwards: hold the last total. Once a reset has been accepted there
+        # is nothing left to hold and the next poll starts the counter again.
+        return self._last
 
 
 class SolarEdgeBatteryEnergyExport(SolarEdgeBatteryEnergyBase):

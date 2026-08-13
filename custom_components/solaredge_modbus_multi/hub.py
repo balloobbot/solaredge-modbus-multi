@@ -649,7 +649,9 @@ class SolarEdgeInverter:
 
         The names are the library's: ``inverter``, ``meter_1``, ``battery_1``
         and so on. A device that did not answer keeps its previous values, so
-        its entities go unavailable rather than showing stale ones.
+        its entities go unavailable rather than showing stale ones — except
+        the energy totals, which hold their last value to keep long-term
+        statistics unbroken.
         """
         return name not in self._failed
 

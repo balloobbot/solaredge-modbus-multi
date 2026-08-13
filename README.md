@@ -40,6 +40,13 @@ failed are held back rather than repeated as if they were fresh — and the log
 names the device and the error behind it. Only losing the connection itself
 fails the whole update.
 
+Energy totals are the exception: they stay available and hold their last
+reading whenever a device stops answering, including overnight when the
+inverter powers down entirely. An unavailable total-increasing sensor puts a
+gap in Home Assistant's long-term statistics and the energy dashboard, so a
+counter keeps its value and the connectivity entities report whether the
+hardware is actually there.
+
 Read about more features on the wiki: [WillCodeForCats/solaredge-modbus-multi/wiki](https://github.com/WillCodeForCats/solaredge-modbus-multi/wiki)
 
 ## Installation
