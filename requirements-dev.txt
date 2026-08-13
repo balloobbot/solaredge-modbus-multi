@@ -1,7 +1,9 @@
 # Everything the test suite needs. The device library tests run against
 # modbus-connection's mock backend; the entity tests import Home Assistant but
-# do not start it.
+# do not start it. test_setup.py does start it, through the harness below,
+# which pins the Home Assistant it was built against.
 -r requirements.txt
 homeassistant>=2025.2.0
 pytest>=8
 pytest-asyncio>=0.24
+pytest-homeassistant-custom-component==0.13.316
