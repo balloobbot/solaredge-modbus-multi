@@ -346,3 +346,42 @@ async def test_selecting_a_limit_mode_clears_only_its_own_group(
     written = (await mock_modbus_unit.read_holding_registers(57344, 1))[0]
     # Bit 1 replaced by bit 2; bits 10 and 11 untouched.
     assert written == 0b0000_1100_0000_0100
+
+
+async def test_a_failed_meter_takes_only_its_own_entities_unavailable(
+    mock_modbus_unit,
+) -> None:
+    """The bug this migration was asked to fix, seen from the entity layer.
+
+    One pooled read meant a meter that went quiet failed the coordinator and
+    every entity on the hub went unavailable. The poll now contains it, and the
+    report says which device it was.
+    """
+    from modbus_connection import ModbusTimeoutError
+
+    seed_inverter(mock_modbus_unit)
+    seed_meter(mock_modbus_unit, meter_id=1)
+    seed_battery(mock_modbus_unit, battery_id=1)
+
+    hub = await _build_hub(mock_modbus_unit, detect_meters=True, detect_batteries=True)
+    entities = await _entities_for(hub, *ALL_PLATFORMS)
+    meter_uid = hub.meters[0].uid_base
+    meter_entities = [e for e in entities if e.unique_id.startswith(f"{meter_uid}_")]
+
+    before = {e.unique_id: e.available for e in entities}
+    assert len(meter_entities) > 50
+    assert all(before[e.unique_id] for e in meter_entities)
+
+    mock_modbus_unit.fail_read(40121, ModbusTimeoutError("slow meter"))
+    await hub.inverters[0].async_update()
+
+    after = {e.unique_id: e.available for e in entities}
+    lost = {uid for uid, was in before.items() if was and not after[uid]}
+    # Everything the failure took belonged to the meter, and it took all of it
+    # bar the Last Update diagnostic, which reports the coordinator rather than
+    # the device and is available by design.
+    assert lost == {e.unique_id for e in meter_entities} - {
+        f"{meter_uid}_last_update_timestamp"
+    }
+    assert hub.inverters[0].online and hub.batteries[0].online
+    assert not hub.meters[0].online

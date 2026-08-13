@@ -600,6 +600,7 @@ class SolarEdgeInverter:
         self.has_parent = False
         self.mmppt_units: list[SolarEdgeMMPPTUnit] = []
         self._use_status_vendor4 = False
+        self._failed: dict[str, ModbusError] = {}
 
         self.manufacturer = device.common.mn
         self.model = device.common.md
@@ -627,8 +628,28 @@ class SolarEdgeInverter:
 
     async def async_update(self) -> None:
         """Refresh this inverter and everything behind it."""
-        await self.device.async_update()
+        report = await self.device.async_update()
+        if set(report.failed) != set(self._failed):
+            if report.failed:
+                what = ", ".join(
+                    f"{name} ({err})" for name, err in sorted(report.failed.items())
+                )
+                _LOGGER.warning(
+                    f"I{self.inverter_unit_id}: keeping previous values for {what}"
+                )
+            else:
+                _LOGGER.info(f"I{self.inverter_unit_id}: everything answered again")
+        self._failed = report.failed
         self._resize_mmppt_units()
+
+    def refreshed(self, name: str) -> bool:
+        """Whether the last poll refreshed one of the devices behind this unit.
+
+        The names are the library's: ``inverter``, ``meter_1``, ``battery_1``
+        and so on. A device that did not answer keeps its previous values, so
+        its entities go unavailable rather than showing stale ones.
+        """
+        return name not in self._failed
 
     def _resize_mmppt_units(self) -> None:
         """Track a module count that changed between polls.
@@ -707,7 +728,7 @@ class SolarEdgeInverter:
     @property
     def online(self) -> bool:
         """Device is online."""
-        return self.hub.online
+        return self.hub.online and self.refreshed("inverter")
 
     @property
     def fw_version(self) -> str | None:
@@ -827,7 +848,7 @@ class SolarEdgeMeter:
     @property
     def online(self) -> bool:
         """Device is online."""
-        return self.hub.online
+        return self.hub.online and self.inverter.refreshed(f"meter_{self.meter_id}")
 
     @property
     def device_info(self) -> DeviceInfo:
@@ -888,7 +909,9 @@ class SolarEdgeBattery:
     @property
     def online(self) -> bool:
         """Device is online."""
-        return self.hub.online
+        return self.hub.online and self.inverter.refreshed(
+            f"battery_{self.battery_id}"
+        )
 
     @property
     def device_info(self) -> DeviceInfo:
@@ -934,10 +957,12 @@ class SolarEdgeEVSE:
         self.device_address = device.common.da
         self.name = f"{hub.hub_id.capitalize()} E{unit_id}"
         self.uid_base = f"{self.model}_{self.serial}"
+        self._answered = True
 
     async def async_update(self) -> None:
         """Refresh the identity block, which is where the firmware version is."""
-        await self.device.async_update()
+        report = await self.device.async_update()
+        self._answered = report.complete
 
     @property
     def common(self):
@@ -947,7 +972,7 @@ class SolarEdgeEVSE:
     @property
     def online(self) -> bool:
         """Device is online."""
-        return self.hub.online
+        return self.hub.online and self._answered
 
     @property
     def fw_version(self) -> str | None:
