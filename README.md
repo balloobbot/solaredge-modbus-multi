@@ -26,7 +26,19 @@ discovery and may not be supported by SolarEdge.
 - Connects locally using Modbus/TCP - no cloud dependencies.
 - Informational sensor for device and its attributes
 - Supports status and error reporting sensors.
+- Contains a failing device so it cannot take the rest of the poll with it.
 - User friendly: Config Flow, Options, Repair Issues, and Reconfiguration.
+
+### Partial updates
+
+The inverter, each of its meters and each of its batteries are polled
+separately, so a device that does not answer no longer takes the others with
+it: everything else on the same inverter still refreshes, and only that
+device's entities go unavailable. One slow meter no longer blanks every sensor
+on the hub. Nothing stale is published in the meantime — the readings that
+failed are held back rather than repeated as if they were fresh — and the log
+names the device and the error behind it. Only losing the connection itself
+fails the whole update.
 
 Read about more features on the wiki: [WillCodeForCats/solaredge-modbus-multi/wiki](https://github.com/WillCodeForCats/solaredge-modbus-multi/wiki)
 
