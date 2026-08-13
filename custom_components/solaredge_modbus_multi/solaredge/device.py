@@ -81,9 +81,10 @@ class SolarEdgeOptions:
 
 @dataclass(frozen=True)
 class UpdateReport:
-    """What one poll refreshed, by the names :meth:`SolarEdgeDevice.async_update`
-    polls under: ``inverter``, ``meter_1`` to ``meter_3``, ``battery_1`` to
-    ``battery_3``, and each optional block's own name.
+    """What one poll refreshed, by the name each thing polled goes under.
+
+    The names are ``inverter``, ``meter_1`` to ``meter_3``, ``battery_1`` to
+    ``battery_3``, and each optional block's own key.
 
     A failed name kept its previous values and did not notify; the error that
     failed it rides along. An optional block the inverter refuses outright is
