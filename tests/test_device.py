@@ -180,7 +180,7 @@ async def test_a_refused_optional_block_does_not_fail_the_poll(
     assert device.meters[0].meter.w == -1500
 
 
-async def test_one_poll_pools_the_whole_unit(mock_modbus_unit) -> None:
+async def test_a_poll_pools_each_device_but_not_across_them(mock_modbus_unit) -> None:
     seed_inverter(mock_modbus_unit)
     seed_meter(mock_modbus_unit, meter_id=1)
     seed_meter(mock_modbus_unit, meter_id=2)
@@ -208,16 +208,29 @@ async def test_one_poll_pools_the_whole_unit(mock_modbus_unit) -> None:
     # reads merge and are cut at the 125-register Modbus ceiling instead of at
     # a model boundary, which costs nothing: every register in them is one a
     # field asked for.
+    #
+    # Pooling now stops at each device, so the two meters no longer share a
+    # run: the 348 registers from 40121 to 40468 are still all read and none
+    # more, but the cut at 40294/40295 is the boundary between meter 1's model
+    # and meter 2's common block, which costs one extra request per meter and
+    # buys containment — a meter that goes quiet no longer fails the poll.
     assert [(block.address, block.count) for block in blocks] == [
         (40002, 107),  # inverter common and inverter model, back to back
-        (40121, 124),  # both meters' common blocks and models, in three reads
-        (40245, 125),
-        (40370, 99),
+        (40121, 124),  # meter 1: its common block and model, in two reads
+        (40245, 50),
+        (40295, 124),  # meter 2: the same shape one slot along
+        (40419, 50),
         (57600, 76),  # battery identity and power limits
         (57708, 46),  # battery measurements, past the unmapped hole
         (40113, 2),  # grid status, on its own
         (40119, 2),  # extended vendor status, on its own
     ]
+    # Each meter's slot is covered whole and by reads that stay inside it: a
+    # common block (2 + 65) followed by its model (2 + 105).
+    for base in (40121, 40295):
+        inside = [b for b in blocks if base <= b.address < base + 174]
+        assert [(b.address, b.count) for b in inside] == [(base, 124), (base + 124, 50)]
+        assert sum(b.count for b in inside) == 67 + 107
 
 
 @pytest.mark.parametrize("mppt_units", [None, 2, 3])

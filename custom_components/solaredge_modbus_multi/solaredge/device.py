@@ -3,8 +3,9 @@
 A SolarEdge installation puts several logical devices behind a single unit id.
 The inverter answers the SunSpec map at 40000; up to three meters follow it in
 the same model chain; up to three batteries sit in a proprietary range; and the
-inverter's own control blocks are scattered across two more. All of it is one
-unit, so all of it pools into one set of block reads.
+inverter's own control blocks are scattered across two more. Each of those is
+polled on its own, so one that stops answering keeps its previous values while
+the rest still refresh.
 """
 
 from __future__ import annotations
@@ -14,7 +15,13 @@ import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from modbus_connection import IllegalDataAddressError, IllegalFunctionError
+from modbus_connection import (
+    IllegalDataAddressError,
+    IllegalFunctionError,
+    ModbusConnectionError,
+    ModbusError,
+    ModbusTimeoutError,
+)
 from modbus_connection.model import Component, ComponentGroup
 from modbus_connection.model.sunspec import SunSpecError, SunSpecModel, scan
 
@@ -70,6 +77,28 @@ class SolarEdgeOptions:
     to suit an ordinary poll. These two blocks are known to take several times
     as long on some inverters, so they get their own budget on top.
     """
+
+
+@dataclass(frozen=True)
+class UpdateReport:
+    """What one poll refreshed, by the names :meth:`SolarEdgeDevice.async_update`
+    polls under: ``inverter``, ``meter_1`` to ``meter_3``, ``battery_1`` to
+    ``battery_3``, and each optional block's own name.
+
+    A failed name kept its previous values and did not notify; the error that
+    failed it rides along. An optional block the inverter refuses outright is
+    absent rather than failed, and appears in neither set. A dead link is never
+    in here — the update raises ``ModbusConnectionError`` instead of reporting
+    partial silence.
+    """
+
+    updated: set[str]
+    failed: dict[str, ModbusError]
+
+    @property
+    def complete(self) -> bool:
+        """Whether everything polled refreshed."""
+        return not self.failed
 
 
 @dataclass
@@ -152,7 +181,9 @@ class SolarEdgeDevice:
         self.meters: list[MeterDevice] = []
         self.batteries: list[BatteryDevice] = []
 
-        self._group: ComponentGroup | None = None
+        # One read plan per logical device, keyed by the name it reports under.
+        # ``None`` until setup has run, which is what marks the device unset up.
+        self._polled: dict[str, ComponentGroup] | None = None
         self._optional: dict[str, OptionalBlock] = {}
         self._models: SunSpecModels | None = None
 
@@ -196,7 +227,7 @@ class SolarEdgeDevice:
         if self.options.detect_meters:
             self._setup_meters(models)
         self._setup_optional_blocks(inverter_model)
-        self._build_group()
+        self._build_polled()
 
     async def async_read_identity(self) -> Common:
         """Read the SunSpec identity block, and stop there.
@@ -211,9 +242,12 @@ class SolarEdgeDevice:
         common_model = models.first(COMMON_MODEL_ID)
         if common_model is None:
             raise DeviceInvalid(f"ID {self.unit_id} publishes no SunSpec common model")
-        self.common = Common(self._unit, common_model)
-        await self.common.async_update()
-        self._group = ComponentGroup(self._unit, [self.common])
+        common = Common(self._unit, common_model)
+        await common.async_update()
+        # Settled only once the read landed: a block left half read would stop
+        # the next attempt from trying again, and setup would build on it.
+        self.common = common
+        self._polled = {"inverter": ComponentGroup(self._unit, [common])}
         return self.common
 
     def _setup_mppt(self, models: SunSpecModels) -> None:
@@ -313,64 +347,120 @@ class SolarEdgeDevice:
                 continue
             self.batteries.append(battery)
             _LOGGER.debug("Found I%sB%s", self.unit_id, battery_id)
-        self._build_group()
+        self._build_polled()
 
-    def _build_group(self) -> None:
-        """Pool everything polled on every cycle into one read plan."""
+    def _build_polled(self) -> None:
+        """Pool each logical device's components into its own read plan.
+
+        Pooling stops at the device boundary rather than covering the unit:
+        everything in one plan stands or falls together, and a meter that goes
+        quiet must not take the inverter's values with it. Within a device the
+        blocks sit back to back anyway, so the reads still merge.
+        """
         assert self.common is not None
-        components: list[Component] = [self.common]
+        inverter: list[Component] = [self.common]
         if self.inverter is not None:
-            components.append(self.inverter)
+            inverter.append(self.inverter)
         if self.mppt is not None:
-            components.append(self.mppt)
+            inverter.append(self.mppt)
+        polled = {"inverter": ComponentGroup(self._unit, inverter)}
         for meter in self.meters:
-            components.extend(meter.components)
+            polled[f"meter_{meter.meter_id}"] = ComponentGroup(
+                self._unit, meter.components
+            )
         for battery in self.batteries:
-            components.extend(battery.components)
-        self._group = ComponentGroup(self._unit, components)
+            polled[f"battery_{battery.battery_id}"] = ComponentGroup(
+                self._unit, battery.components
+            )
+        self._polled = polled
 
     # -- polling ---------------------------------------------------------------
 
-    async def async_update(self) -> None:
-        """Refresh this unit.
+    async def async_update(self) -> UpdateReport:
+        """Refresh this unit, and report what came back.
 
-        The required blocks go out as one pooled set of reads; each optional
-        block follows on its own so that one the inverter does not serve cannot
-        fail the rest.
+        Each logical device goes out as its own pooled set of reads and each
+        optional block follows on its own, so neither a device that stops
+        answering nor a block the inverter does not serve can fail the rest —
+        what failed keeps its previous values and is named in the report.
+        Listeners fire once everything has been tried, and only for what
+        refreshed. A failure of the link itself raises instead of reporting.
         """
-        if self._group is None:
+        if self._polled is None:
             raise DeviceNotSetUp(f"ID {self.unit_id} was polled before setup")
-        await self._group.async_update()
+        updated: set[str] = set()
+        failed: dict[str, ModbusError] = {}
+        fresh: list[ComponentGroup | Component] = []
+        for name, group in self._polled.items():
+            try:
+                await group.async_update(notify=False)
+            except ModbusConnectionError:
+                raise
+            except ModbusError as err:
+                _LOGGER.debug("I%s: %s did not refresh: %s", self.unit_id, name, err)
+                failed[name] = err
+            else:
+                updated.add(name)
+                fresh.append(group)
         for name, block in self._optional.items():
-            await self._poll_optional(name, block)
+            error = await self._poll_optional(name, block)
+            if error is not None:
+                failed[name] = error
+            elif block.supported:
+                updated.add(name)
+                fresh.append(block.component)
+        for component in fresh:
+            component.notify()
+        return UpdateReport(updated, failed)
 
-    async def _poll_optional(self, name: str, block: OptionalBlock) -> None:
-        """Read one optional block, remembering what the inverter said about it."""
+    async def _poll_optional(
+        self, name: str, block: OptionalBlock
+    ) -> ModbusError | None:
+        """Read one optional block, remembering what the inverter said about it.
+
+        Returns the error that stopped it, or ``None``. A block the inverter
+        refuses outright is absent rather than failed, so it reports neither.
+        """
         if block.supported is False:
-            return
+            return None
         try:
             if block.timeout is None:
-                await block.component.async_update()
+                await block.component.async_update(notify=False)
             else:
                 async with asyncio.timeout(block.timeout):
-                    await block.component.async_update()
+                    await block.component.async_update(notify=False)
+        except ModbusConnectionError:
+            raise
         except (IllegalDataAddressError, IllegalFunctionError):
             block.supported = False
             _LOGGER.debug("I%s: %s NOT available", self.unit_id, name)
-        except TimeoutError:
+            return None
+        except TimeoutError as err:
             # Left unsettled on purpose: an inverter that is merely slow to
-            # answer this block should get another chance next cycle.
+            # answer this block should get another chance next cycle. The
+            # budget above is ours, so its plain TimeoutError becomes a
+            # modbus one to report under.
             block.timed_out = True
             _LOGGER.debug("I%s: %s timed out", self.unit_id, name)
+            if isinstance(err, ModbusTimeoutError):
+                return err
+            return ModbusTimeoutError(f"I{self.unit_id}: {name} timed out")
+        except ModbusError as err:
+            _LOGGER.debug("I%s: %s did not refresh: %s", self.unit_id, name, err)
+            return err
         else:
             block.supported = True
             block.timed_out = False
+            return None
 
     async def async_read_raw(self) -> dict[str, dict[int, int | bool]]:
         """Return every register this device reads, undecoded, for diagnostics."""
-        if self._group is None:
+        if self._polled is None:
             raise DeviceNotSetUp(f"ID {self.unit_id} was read before setup")
-        raw = await self._group.async_read_raw()
+        raw: dict[str, dict[int, int | bool]] = {}
+        for group in self._polled.values():
+            for space, values in (await group.async_read_raw()).items():
+                raw.setdefault(space, {}).update(values)
         for block in self._optional.values():
             if block.supported is False:
                 continue

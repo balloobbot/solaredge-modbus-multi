@@ -9,7 +9,13 @@ no Home Assistant in the loop.
 from __future__ import annotations
 
 from .const import BATTERY_REG_BASE, METER_REG_BASE, SUNSPEC_BASE_ADDRESS
-from .device import BatteryDevice, MeterDevice, SolarEdgeDevice, SolarEdgeOptions
+from .device import (
+    BatteryDevice,
+    MeterDevice,
+    SolarEdgeDevice,
+    SolarEdgeOptions,
+    UpdateReport,
+)
 from .errors import DeviceInvalid, DeviceNotSetUp, SolarEdgeError
 from .models import (
     Common,
@@ -61,4 +67,5 @@ __all__ = [
     "SolarEdgeOptions",
     "StatusVendor4",
     "StorageControl",
+    "UpdateReport",
 ]
