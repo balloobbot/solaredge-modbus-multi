@@ -757,9 +757,9 @@ class SolarEdgeAccumulatorBase(SolarEdgeSensorBase):
     """A TOTAL_INCREASING sensor over a SunSpec accumulator.
 
     SolarEdge accumulators have been seen going backwards, which Home Assistant
-    reads as a meter reset and turns into a spike. Holding the entity
-    unavailable for that poll is the lesser evil; the counter usually recovers
-    on the next one.
+    reads as a meter reset and turns into a spike. The last good total is
+    published instead until the counter recovers, which it usually does on the
+    next poll.
     """
 
     def __init__(self, platform, config_entry, coordinator, phase: str = None):
