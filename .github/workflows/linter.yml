@@ -28,5 +28,9 @@ jobs:
           VALIDATE_PYTHON_PYLINT: false
           VALIDATE_PYTHON_PYINK: false
           VALIDATE_PYTHON_BLACK: false
+          # isort's own config lives in setup.cfg; without this super-linter
+          # reads its bundled one, which drops the black profile and roots the
+          # project outside the repo, so custom_components looks third-party.
+          PYTHON_ISORT_CONFIG_FILE: setup.cfg
           DEFAULT_BRANCH: main
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
