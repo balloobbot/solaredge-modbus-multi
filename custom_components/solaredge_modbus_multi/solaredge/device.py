@@ -88,9 +88,10 @@ class UpdateReport:
 
     A failed name kept its previous values and did not notify; the error that
     failed it rides along. An optional block the inverter refuses outright is
-    absent rather than failed, and appears in neither set. A dead link is never
-    in here — the update raises ``ModbusConnectionError`` instead of reporting
-    partial silence.
+    absent rather than failed, and appears in neither set. Silence is never in
+    here — a dead link raises ``ModbusConnectionError`` and a unit that
+    answered nothing at all raises ``ModbusTimeoutError``, rather than either
+    being reported as partial.
     """
 
     updated: set[str]
@@ -357,6 +358,9 @@ class SolarEdgeDevice:
         everything in one plan stands or falls together, and a meter that goes
         quiet must not take the inverter's values with it. Within a device the
         blocks sit back to back anyway, so the reads still merge.
+
+        The inverter leads: it is the one device that is always there, so it
+        makes the probe that decides whether the unit is answering at all.
         """
         assert self.common is not None
         inverter: list[Component] = [self.common]
@@ -385,7 +389,8 @@ class SolarEdgeDevice:
         answering nor a block the inverter does not serve can fail the rest —
         what failed keeps its previous values and is named in the report.
         Listeners fire once everything has been tried, and only for what
-        refreshed. A failure of the link itself raises instead of reporting.
+        refreshed. A failure of the link itself raises instead of reporting,
+        and so does a unit that answers nothing at all.
         """
         if self._polled is None:
             raise DeviceNotSetUp(f"ID {self.unit_id} was polled before setup")
@@ -397,6 +402,14 @@ class SolarEdgeDevice:
                 await group.async_update(notify=False)
             except ModbusConnectionError:
                 raise
+            except ModbusTimeoutError as err:
+                # Nothing has answered yet, so this is the unit rather than one
+                # device on it — an inverter asleep behind a bridge that keeps
+                # the socket open. Walking the rest would pay a timeout each.
+                if not updated and not failed:
+                    raise
+                _LOGGER.debug("I%s: %s did not refresh: %s", self.unit_id, name, err)
+                failed[name] = err
             except ModbusError as err:
                 _LOGGER.debug("I%s: %s did not refresh: %s", self.unit_id, name, err)
                 failed[name] = err

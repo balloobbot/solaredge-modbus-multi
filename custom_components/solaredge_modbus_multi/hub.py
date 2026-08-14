@@ -390,8 +390,18 @@ class SolarEdgeModbusMultiHub:
         nothing came back at all — and then it carries one of the errors, since
         Home Assistant shows the user the message and nothing else.
         """
-        reports = [await inverter.async_update() for inverter in self.inverters]
-        reports += [await evse.async_update() for evse in self.evses]
+        reports: list[UpdateReport] = []
+        for device in (*self.inverters, *self.evses):
+            try:
+                reports.append(await device.async_update())
+            except ModbusTimeoutError:
+                # A unit that answered nothing at all. While nothing else has
+                # answered either that is the link, and the units after it
+                # would only pay a timeout each; once something has, it is one
+                # inverter asleep on a link that works — a follower at dusk.
+                if not any(report.updated for report in reports):
+                    raise
+                _LOGGER.debug("%s answered nothing; the link is up", device.name)
 
         if any(report.updated for report in reports):
             return
@@ -619,6 +629,7 @@ class SolarEdgeInverter:
         self.report: UpdateReport | None = None
         self._use_status_vendor4 = False
         self._failed: frozenset[str] = frozenset()  # what was warned about last
+        self._silent = False  # the last poll got nothing at all out of this unit
 
         self.manufacturer = device.common.mn
         self.model = device.common.md
@@ -646,7 +657,13 @@ class SolarEdgeInverter:
 
     async def async_update(self) -> UpdateReport:
         """Refresh this inverter and everything behind it."""
-        self.report = await self.device.async_update()
+        try:
+            self.report = await self.device.async_update()
+        except ModbusTimeoutError:
+            # No report at all, so the last one must stop standing in for it.
+            self._silent = True
+            raise
+        self._silent = False
         for name in sorted(self.report.failed.keys() - self._failed):
             _LOGGER.warning(
                 "Failed to fetch I%s %s: %s",
@@ -665,8 +682,11 @@ class SolarEdgeInverter:
         and so on. A device that did not answer keeps its previous values, so
         its entities go unavailable rather than showing stale ones — except
         the energy totals, which hold their last value to keep long-term
-        statistics unbroken.
+        statistics unbroken. A unit that answered nothing refreshed none of
+        them.
         """
+        if self._silent:
+            return False
         return self.report is None or name not in self.report.failed
 
     def _resize_mmppt_units(self) -> None:
@@ -1000,7 +1020,11 @@ class SolarEdgeEVSE:
 
     async def async_update(self) -> UpdateReport:
         """Refresh the identity block, which is where the firmware version is."""
-        report = await self.device.async_update()
+        try:
+            report = await self.device.async_update()
+        except ModbusTimeoutError:
+            self._answered = False
+            raise
         self._answered = report.complete
         return report
 

@@ -79,6 +79,28 @@ async def test_listeners_fire_at_the_end_and_only_for_fresh_devices(
     assert seen == [len(mock_modbus_unit.read_events)]
 
 
+async def test_a_unit_that_answers_nothing_raises_instead_of_being_walked(
+    mock_modbus_unit,
+) -> None:
+    """An inverter asleep behind a bridge that keeps the socket open.
+
+    The link is up, so nothing raises a connection error; every device on the
+    unit would simply time out in turn. The first read is the probe, and its
+    timeout ends the poll rather than costing one per device.
+    """
+    device = await _seeded(mock_modbus_unit)
+    await device.async_update()
+
+    mock_modbus_unit.fail_requests(ModbusTimeoutError("asleep"))
+    mock_modbus_unit.read_events.clear()
+    with pytest.raises(ModbusTimeoutError):
+        await device.async_update()
+
+    # The mock records a read before it fails it, so this counts what was
+    # actually asked for: the probe, and nothing behind it.
+    assert len(mock_modbus_unit.read_events) == 1
+
+
 async def test_a_dead_link_raises_instead_of_reporting(mock_modbus_unit) -> None:
     device = await _seeded(mock_modbus_unit)
     await device.async_update()
