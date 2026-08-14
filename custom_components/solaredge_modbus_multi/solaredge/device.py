@@ -455,18 +455,25 @@ class SolarEdgeDevice:
             return None
 
     async def async_read_raw(self) -> dict[str, dict[int, int | bool]]:
-        """Return every register this device reads, undecoded, for diagnostics."""
+        """Return every register this device reads, undecoded, for diagnostics.
+
+        The fields refresh, but nothing notifies: a diagnostics download is not
+        a poll, and firing the listeners would write a state for every entity
+        off the update cycle.
+        """
         if self._polled is None:
             raise DeviceNotSetUp(f"ID {self.unit_id} was read before setup")
         raw: dict[str, dict[int, int | bool]] = {}
         for group in self._polled.values():
-            for space, values in (await group.async_read_raw()).items():
+            for space, values in (await group.async_read_raw(notify=False)).items():
                 raw.setdefault(space, {}).update(values)
         for block in self._optional.values():
             if block.supported is False:
                 continue
             try:
-                for space, values in (await block.component.async_read_raw()).items():
+                for space, values in (
+                    await block.component.async_read_raw(notify=False)
+                ).items():
                     raw.setdefault(space, {}).update(values)
             except Exception as err:  # noqa: BLE001 - diagnostics must not fail
                 _LOGGER.debug(

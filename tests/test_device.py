@@ -283,6 +283,28 @@ async def test_raw_read_covers_the_optional_blocks(mock_modbus_unit) -> None:
     assert sorted(holding) == list(holding)  # addresses ascending, for diagnostics
 
 
+async def test_a_raw_read_refreshes_without_notifying(mock_modbus_unit) -> None:
+    seed_inverter(mock_modbus_unit)
+
+    device = SolarEdgeDevice(mock_modbus_unit, 1)
+    await device.async_setup()
+    await device.async_update()
+
+    fired: list[str] = []
+    assert device.inverter is not None
+    device.inverter.add_update_listener(lambda: fired.append("inverter"))
+    assert device.grid_status is not None
+    device.grid_status.add_update_listener(lambda: fired.append("grid_status"))
+
+    # A diagnostics download is not a poll: the fields refresh, but nothing
+    # fires, so no entity writes a state off the update cycle.
+    await device.async_read_raw()
+    assert fired == []
+
+    await device.async_update()
+    assert sorted(fired) == ["grid_status", "inverter"]
+
+
 async def test_a_moved_model_is_reported_rather_than_read_stale(
     mock_modbus_unit,
 ) -> None:
