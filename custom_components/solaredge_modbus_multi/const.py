@@ -64,6 +64,12 @@ class SolarEdgeTimeouts(IntEnum):
     Read = 6000
 
 
+# Seconds between reads of the two advanced power control blocks. They are 170
+# of the 601 registers a full poll reads and hold the inverter's grid profile,
+# which changes only when an installer or this integration writes it.
+ADV_PWR_CONTROL_INTERVAL = 600
+
+
 class BatteryLimit(IntEnum):
     """Configure battery limits for input and display validation."""
 

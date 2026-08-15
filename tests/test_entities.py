@@ -510,3 +510,30 @@ async def test_an_accepted_battery_reset_publishes_the_new_total(
     await hub.inverters[0].async_update()
     _process_totals(entities)
     assert export.native_value == 1_000
+
+
+async def test_writing_a_control_re_reads_its_block_on_the_next_poll(
+    mock_modbus_unit,
+) -> None:
+    seed_inverter(mock_modbus_unit)
+    hub = await _build_hub(
+        mock_modbus_unit, detect_extras=True, slow_block_interval=600
+    )
+    entities = await _entities_for(hub, number)
+    uid = hub.inverters[0].uid_base
+    reduce = next(e for e in entities if e.unique_id == f"{uid}_power_reduce")
+
+    # Without the write the block would sit out this poll; the write puts it
+    # back in, so the entity shows what the inverter took rather than what it
+    # was asked for.
+    mark = len(mock_modbus_unit.read_events)
+    await hub.inverters[0].async_write(reduce.block, reduce._field, 55.0)
+    await hub.inverters[0].async_update()
+
+    covered = [
+        event
+        for event in mock_modbus_unit.read_events[mark:]
+        if event.address <= 61696 < event.address + event.count
+    ]
+    assert len(covered) == 1
+    assert reduce.native_value == pytest.approx(55.0)

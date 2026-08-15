@@ -344,6 +344,99 @@ async def test_the_slow_blocks_get_their_own_budget(mock_modbus_unit) -> None:
     }
 
 
+def _reads_at(unit, address: int, *, since: int = 0) -> int:
+    """How many reads covered an address, counting from a point in the log."""
+    return sum(
+        1
+        for event in unit.read_events[since:]
+        if event.address <= address < event.address + event.count
+    )
+
+
+async def _extras_device(unit, **options) -> SolarEdgeDevice:
+    seed_inverter(unit)
+    device = SolarEdgeDevice(
+        unit, 1, SolarEdgeOptions(detect_extras=True, **options)
+    )
+    await device.async_setup()
+    return device
+
+
+async def test_the_grid_profile_blocks_are_read_on_their_own_interval(
+    mock_modbus_unit,
+) -> None:
+    device = await _extras_device(mock_modbus_unit, slow_block_interval=600)
+
+    await device.async_update()
+    assert _reads_at(mock_modbus_unit, 61696) == 1
+    assert _reads_at(mock_modbus_unit, 61782) == 1
+
+    mark = len(mock_modbus_unit.read_events)
+    await device.async_update()
+
+    # The grid profile sat out this poll; the measurements and the ripple
+    # control receiver did not.
+    assert _reads_at(mock_modbus_unit, 61696, since=mark) == 0
+    assert _reads_at(mock_modbus_unit, 61782, since=mark) == 0
+    assert _reads_at(mock_modbus_unit, 61440, since=mark) == 1
+    assert _reads_at(mock_modbus_unit, 40072, since=mark) == 1
+
+
+async def test_a_block_on_an_interval_reports_as_neither_updated_nor_failed(
+    mock_modbus_unit,
+) -> None:
+    device = await _extras_device(mock_modbus_unit, slow_block_interval=600)
+
+    first = await device.async_update()
+    assert "advanced_power_control" in first.updated
+
+    second = await device.async_update()
+    assert "advanced_power_control" not in second.updated
+    assert second.complete  # skipping is not failing
+
+
+async def test_a_write_re_reads_its_block_before_the_interval_is_up(
+    mock_modbus_unit,
+) -> None:
+    device = await _extras_device(mock_modbus_unit, slow_block_interval=600)
+    await device.async_update()
+
+    device.mark_due(device.block("advanced_power_control"))
+    mark = len(mock_modbus_unit.read_events)
+    await device.async_update()
+
+    assert _reads_at(mock_modbus_unit, 61696, since=mark) == 1
+    # Only the block that was written to; the other one still waits.
+    assert _reads_at(mock_modbus_unit, 61782, since=mark) == 0
+
+
+async def test_a_grid_profile_block_fails_on_its_own_when_it_is_read(
+    mock_modbus_unit,
+) -> None:
+    device = await _extras_device(mock_modbus_unit, slow_block_interval=600)
+    mock_modbus_unit.fail_read(61696, ModbusTimeoutError("no answer"))
+
+    report = await device.async_update()
+
+    # Its own failure, carried alone: the rest of the poll is untouched.
+    assert set(report.failed) == {"advanced_power_control"}
+    assert "advanced_power_control_2" in report.updated
+    assert device.inverter.a == pytest.approx(12.34)
+
+
+async def test_without_an_interval_every_block_is_read_every_poll(
+    mock_modbus_unit,
+) -> None:
+    device = await _extras_device(mock_modbus_unit)
+
+    await device.async_update()
+    mark = len(mock_modbus_unit.read_events)
+    await device.async_update()
+
+    assert _reads_at(mock_modbus_unit, 61696, since=mark) == 1
+    assert _reads_at(mock_modbus_unit, 61782, since=mark) == 1
+
+
 async def test_an_evse_stops_at_its_identity_block(mock_modbus_unit) -> None:
     from .fixtures import END_OF_CHAIN, seed_common
 

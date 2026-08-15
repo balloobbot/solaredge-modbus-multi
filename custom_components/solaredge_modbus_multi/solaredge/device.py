@@ -12,7 +12,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from modbus_connection import (
@@ -78,6 +79,14 @@ class SolarEdgeOptions:
     as long on some inverters, so they get their own budget on top.
     """
 
+    slow_block_interval: float | None = None
+    """Seconds between reads of the power control blocks.
+
+    170 of the 601 registers a full poll reads are grid-profile settings that
+    change only when an installer or this integration writes them, so they do
+    not have to be read at the rate the measurements are.
+    """
+
 
 @dataclass(frozen=True)
 class UpdateReport:
@@ -118,6 +127,22 @@ class OptionalBlock:
     timed_out: bool = False
     timeout: float | None = None
     """Seconds this block is allowed, over the connection's own timeout."""
+
+    interval: float | None = None
+    """Seconds between reads, for a block that changes only when written."""
+
+    last_read: float | None = field(default=None, init=False)
+
+    @property
+    def due(self) -> bool:
+        """Whether this poll should read the block."""
+        if self.interval is None or self.last_read is None:
+            return True
+        return time.monotonic() - self.last_read >= self.interval
+
+    def mark_due(self) -> None:
+        """Have the next poll read the block, whatever its interval says."""
+        self.last_read = None
 
 
 class MeterDevice:
@@ -299,23 +324,28 @@ class SolarEdgeDevice:
         }
         if self.options.detect_extras:
             slow = self.options.slow_block_timeout
+            # The global block keeps the poll's rate: ``rrcr`` is the ripple
+            # control receiver's input, which the grid operator moves, not us.
             self._optional["global_power_control"] = OptionalBlock(
                 GlobalPowerControl(
                     self._unit, base_offset=GLOBAL_POWER_CONTROL_ADDRESS
                 ),
                 timeout=slow,
             )
+            rare = self.options.slow_block_interval
             self._optional["advanced_power_control"] = OptionalBlock(
                 AdvancedPowerControl(
                     self._unit, base_offset=ADVANCED_POWER_CONTROL_ADDRESS
                 ),
                 timeout=slow,
+                interval=rare,
             )
             self._optional["advanced_power_control_2"] = OptionalBlock(
                 AdvancedPowerControl2(
                     self._unit, base_offset=ADVANCED_POWER_CONTROL_2_ADDRESS
                 ),
                 timeout=slow,
+                interval=rare,
             )
         if self.options.site_limit_control:
             self._optional["site_limit"] = OptionalBlock(
@@ -391,6 +421,9 @@ class SolarEdgeDevice:
         Listeners fire once everything has been tried, and only for what
         refreshed. A failure of the link itself raises instead of reporting,
         and so does a unit that answers nothing at all.
+
+        A block whose interval has not elapsed is not read, and reports as
+        neither updated nor failed — the same as one the inverter refuses.
         """
         if self._polled is None:
             raise DeviceNotSetUp(f"ID {self.unit_id} was polled before setup")
@@ -417,6 +450,8 @@ class SolarEdgeDevice:
                 updated.add(name)
                 fresh.append(group)
         for name, block in self._optional.items():
+            if not block.due:
+                continue
             error = await self._poll_optional(name, block)
             if error is not None:
                 failed[name] = error
@@ -465,6 +500,7 @@ class SolarEdgeDevice:
         else:
             block.supported = True
             block.timed_out = False
+            block.last_read = time.monotonic()
             return None
 
     async def async_read_raw(self) -> dict[str, dict[int, int | bool]]:
@@ -495,6 +531,17 @@ class SolarEdgeDevice:
         return {space: dict(sorted(values.items())) for space, values in raw.items()}
 
     # -- optional block access -------------------------------------------------
+
+    def mark_due(self, component: Component) -> None:
+        """Have the next poll re-read the block a component belongs to.
+
+        A block on its own interval would otherwise show the value it had
+        before a write for the rest of that interval.
+        """
+        for block in self._optional.values():
+            if block.component is component:
+                block.mark_due()
+                return
 
     def block(self, name: str) -> Component | None:
         """Return an optional block's component, or ``None`` if it is absent."""

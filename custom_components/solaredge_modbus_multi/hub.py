@@ -34,6 +34,7 @@ from modbus_connection.model import Component
 from modbus_connection.model.sunspec import SunSpecMapShiftError
 
 from .const import (
+    ADV_PWR_CONTROL_INTERVAL,
     DETECT_EVSE_REGEX,
     DOMAIN,
     STATUS_VENDOR4_VERSION,
@@ -192,6 +193,7 @@ class SolarEdgeModbusMultiHub:
             storage_control=self._adv_storage_control,
             site_limit_control=self._adv_site_limit_control,
             slow_block_timeout=SolarEdgeTimeouts.Read / 1000,
+            slow_block_interval=ADV_PWR_CONTROL_INTERVAL,
         )
 
     async def _async_init_solaredge(self) -> None:
@@ -710,6 +712,9 @@ class SolarEdgeInverter:
             raise HomeAssistantError(
                 f"Inverter ID {self.inverter_unit_id} does not serve {field}."
             )
+        # Before the write: a write that fails still has to be read back, since
+        # the entity would otherwise keep showing the value it asked for.
+        self.device.mark_due(component)
         await self.hub.async_write(component, field, value)
 
     @property
