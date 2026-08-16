@@ -120,6 +120,7 @@ async def async_setup_entry(
 ) -> None:
     hub = hass.data[DOMAIN][config_entry.entry_id]["hub"]
     coordinator = hass.data[DOMAIN][config_entry.entry_id]["coordinator"]
+    settings = hass.data[DOMAIN][config_entry.entry_id]["settings_coordinator"]
 
     entities = []
 
@@ -165,10 +166,10 @@ async def async_setup_entry(
             "advanced_power_control"
         ):
             entities.append(
-                SolarEdgeCommitControlSettings(inverter, config_entry, coordinator)
+                SolarEdgeCommitControlSettings(inverter, config_entry, settings)
             )
             entities.append(
-                SolarEdgeDefaultControlSettings(inverter, config_entry, coordinator)
+                SolarEdgeDefaultControlSettings(inverter, config_entry, settings)
             )
 
         if inverter.is_mmppt:

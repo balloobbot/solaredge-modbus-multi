@@ -16,8 +16,15 @@ from homeassistant.helpers.update_coordinator import (
     TimestampDataUpdateCoordinator,
     UpdateFailed,
 )
+from modbus_connection import ModbusError
 
-from .const import DOMAIN, ConfDefaultInt, ConfName, RetrySettings
+from .const import (
+    DOMAIN,
+    SETTINGS_SCAN_INTERVAL,
+    ConfDefaultInt,
+    ConfName,
+    RetrySettings,
+)
 from .hub import (
     DataUpdateFailed,
     HubInitFailed,
@@ -88,12 +95,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         entry.options.get(CONF_SCAN_INTERVAL, ConfDefaultInt.SCAN_INTERVAL),
     )
 
+    settings_coordinator = SolarEdgeSettingsCoordinator(hass, solaredge_hub)
+
     hass.data[DOMAIN][entry.entry_id] = {
         "hub": solaredge_hub,
         "coordinator": coordinator,
+        "settings_coordinator": settings_coordinator,
     }
 
     await coordinator.async_config_entry_first_refresh()
+    # Not a first refresh: an inverter too slow to answer its control blocks
+    # must not stop the entry setting up, and the platforms only need this to
+    # have settled which of those blocks the inverter serves.
+    await settings_coordinator.async_refresh()
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
@@ -239,6 +253,36 @@ async def async_migrate_entry(hass: HomeAssistant, config_entry: ConfigEntry) ->
     )
 
     return True
+
+
+class SolarEdgeSettingsCoordinator(TimestampDataUpdateCoordinator):
+    """Polls the control blocks, which change only when something writes them.
+
+    Its own coordinator rather than a slow tier of the one below: what it reads
+    is the inverter's configuration, so it runs on a fixed slow interval and is
+    refreshed on demand by the entity that just wrote one of them. It does not
+    judge the link — the measurement poll counts the timeouts and drops a stuck
+    connection.
+    """
+
+    def __init__(self, hass: HomeAssistant, hub: SolarEdgeModbusMultiHub) -> None:
+        super().__init__(
+            hass,
+            _LOGGER,
+            name="SolarEdge Settings Coordinator",
+            update_interval=timedelta(seconds=SETTINGS_SCAN_INTERVAL),
+        )
+        self._hub = hub
+
+    async def _async_update_data(self) -> None:
+        while self._hub.has_write:
+            _LOGGER.debug(f"Waiting for write {self._hub.has_write}")
+            await asyncio.sleep(1)
+
+        try:
+            await self._hub.async_refresh_settings()
+        except (DataUpdateFailed, ModbusError) as e:
+            raise UpdateFailed(f"{e}") from e
 
 
 class SolarEdgeCoordinator(TimestampDataUpdateCoordinator):

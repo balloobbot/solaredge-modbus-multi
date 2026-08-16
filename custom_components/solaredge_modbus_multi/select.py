@@ -28,31 +28,31 @@ async def async_setup_entry(
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     hub = hass.data[DOMAIN][config_entry.entry_id]["hub"]
-    coordinator = hass.data[DOMAIN][config_entry.entry_id]["coordinator"]
+    # Every select here is over a control block, so they all follow the poll
+    # that reads those.
+    settings = hass.data[DOMAIN][config_entry.entry_id]["settings_coordinator"]
 
     entities = []
 
     for inverter in hub.inverters:
         """Power Control Options: Storage Control"""
         if hub.option_storage_control and inverter.device.has_block("storage_control"):
-            entities.append(StorageControlMode(inverter, config_entry, coordinator))
-            entities.append(StorageACChargePolicy(inverter, config_entry, coordinator))
-            entities.append(StorageDefaultMode(inverter, config_entry, coordinator))
-            entities.append(StorageCommandMode(inverter, config_entry, coordinator))
+            entities.append(StorageControlMode(inverter, config_entry, settings))
+            entities.append(StorageACChargePolicy(inverter, config_entry, settings))
+            entities.append(StorageDefaultMode(inverter, config_entry, settings))
+            entities.append(StorageCommandMode(inverter, config_entry, settings))
 
         """ Power Control Options: Site Limit Control """
         if hub.option_site_limit_control:
-            entities.append(
-                SolaredgeLimitControlMode(inverter, config_entry, coordinator)
-            )
-            entities.append(SolaredgeLimitControl(inverter, config_entry, coordinator))
+            entities.append(SolaredgeLimitControlMode(inverter, config_entry, settings))
+            entities.append(SolaredgeLimitControl(inverter, config_entry, settings))
 
         """ Power Control Block """
         if hub.option_detect_extras and inverter.device.has_block(
             "advanced_power_control"
         ):
             entities.append(
-                SolarEdgeReactivePowerMode(inverter, config_entry, coordinator)
+                SolarEdgeReactivePowerMode(inverter, config_entry, settings)
             )
 
     if entities:

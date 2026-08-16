@@ -28,6 +28,10 @@ async def async_setup_entry(
 ) -> None:
     hub = hass.data[DOMAIN][config_entry.entry_id]["hub"]
     coordinator = hass.data[DOMAIN][config_entry.entry_id]["coordinator"]
+    # Each entity follows the poll that reads its block. The global power
+    # control block is read with the measurements, for the ripple control
+    # receiver in it, so its two setpoints are too.
+    settings = hass.data[DOMAIN][config_entry.entry_id]["settings_coordinator"]
 
     entities = []
 
@@ -45,29 +49,27 @@ async def async_setup_entry(
         if hub.option_detect_extras and inverter.device.has_block(
             "advanced_power_control"
         ):
-            entities.append(SolarEdgePowerReduce(inverter, config_entry, coordinator))
-            entities.append(SolarEdgeCurrentLimit(inverter, config_entry, coordinator))
+            entities.append(SolarEdgePowerReduce(inverter, config_entry, settings))
+            entities.append(SolarEdgeCurrentLimit(inverter, config_entry, settings))
 
     """ Power Control Options: Storage Control """
     if hub.option_storage_control is True:
         for inverter in hub.inverters:
             if inverter.device.has_block("storage_control") is False:
                 continue
-            entities.append(StorageACChargeLimit(inverter, config_entry, coordinator))
-            entities.append(StorageBackupReserve(inverter, config_entry, coordinator))
-            entities.append(StorageCommandTimeout(inverter, config_entry, coordinator))
+            entities.append(StorageACChargeLimit(inverter, config_entry, settings))
+            entities.append(StorageBackupReserve(inverter, config_entry, settings))
+            entities.append(StorageCommandTimeout(inverter, config_entry, settings))
             if inverter.has_battery is True:
-                entities.append(StorageChargeLimit(inverter, config_entry, coordinator))
-                entities.append(
-                    StorageDischargeLimit(inverter, config_entry, coordinator)
-                )
+                entities.append(StorageChargeLimit(inverter, config_entry, settings))
+                entities.append(StorageDischargeLimit(inverter, config_entry, settings))
 
     """ Power Control Options: Site Limit Control """
     if hub.option_site_limit_control is True:
         for inverter in hub.inverters:
-            entities.append(SolarEdgeSiteLimit(inverter, config_entry, coordinator))
+            entities.append(SolarEdgeSiteLimit(inverter, config_entry, settings))
             entities.append(
-                SolarEdgeExternalProductionMax(inverter, config_entry, coordinator)
+                SolarEdgeExternalProductionMax(inverter, config_entry, settings)
             )
 
     if entities:

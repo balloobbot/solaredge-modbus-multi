@@ -261,3 +261,12 @@ def seed_battery(
 def seed_mppt(unit: Any, *, units: int = 2) -> dict[str, int]:
     """Seed an inverter that publishes the multiple MPPT model."""
     return seed_inverter(unit, mppt_units=units)
+
+
+def reads_at(unit: Any, address: int, *, since: int = 0) -> int:
+    """How many reads covered an address, counting from a point in the log."""
+    return sum(
+        1
+        for event in unit.read_events[since:]
+        if event.address <= address < event.address + event.count
+    )

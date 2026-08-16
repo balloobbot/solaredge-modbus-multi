@@ -6,14 +6,19 @@ the same model chain; up to three batteries sit in a proprietary range; and the
 inverter's own control blocks are scattered across two more. Each of those is
 polled on its own, so one that stops answering keeps its previous values while
 the rest still refresh.
+
+What the unit measures and what it has been configured to do refresh
+separately — :meth:`SolarEdgeDevice.async_update_readings` and
+:meth:`SolarEdgeDevice.async_update_settings` — so a caller can poll the
+control blocks rarely, or on demand after writing one.
+:meth:`SolarEdgeDevice.async_update` does both.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
-import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from modbus_connection import (
@@ -79,21 +84,14 @@ class SolarEdgeOptions:
     as long on some inverters, so they get their own budget on top.
     """
 
-    slow_block_interval: float | None = None
-    """Seconds between reads of the power control blocks.
-
-    170 of the 601 registers a full poll reads are grid-profile settings that
-    change only when an installer or this integration writes them, so they do
-    not have to be read at the rate the measurements are.
-    """
-
 
 @dataclass(frozen=True)
 class UpdateReport:
     """What one poll refreshed, by the name each thing polled goes under.
 
     The names are ``inverter``, ``meter_1`` to ``meter_3``, ``battery_1`` to
-    ``battery_3``, and each optional block's own key.
+    ``battery_3``, and each optional block's own key. A report names only what
+    the method it came from polls.
 
     A failed name kept its previous values and did not notify; the error that
     failed it rides along. An optional block the inverter refuses outright is
@@ -128,21 +126,8 @@ class OptionalBlock:
     timeout: float | None = None
     """Seconds this block is allowed, over the connection's own timeout."""
 
-    interval: float | None = None
-    """Seconds between reads, for a block that changes only when written."""
-
-    last_read: float | None = field(default=None, init=False)
-
-    @property
-    def due(self) -> bool:
-        """Whether this poll should read the block."""
-        if self.interval is None or self.last_read is None:
-            return True
-        return time.monotonic() - self.last_read >= self.interval
-
-    def mark_due(self) -> None:
-        """Have the next poll read the block, whatever its interval says."""
-        self.last_read = None
+    settings: bool = False
+    """Whether the block holds configuration rather than measurements."""
 
 
 class MeterDevice:
@@ -324,39 +309,41 @@ class SolarEdgeDevice:
         }
         if self.options.detect_extras:
             slow = self.options.slow_block_timeout
-            # The global block keeps the poll's rate: ``rrcr`` is the ripple
-            # control receiver's input, which the grid operator moves, not us.
+            # A measurement block despite the two setpoints in it: ``rrcr`` is
+            # the ripple control receiver's input, which the grid operator
+            # moves, not us, and all four registers come back in one read.
             self._optional["global_power_control"] = OptionalBlock(
                 GlobalPowerControl(
                     self._unit, base_offset=GLOBAL_POWER_CONTROL_ADDRESS
                 ),
                 timeout=slow,
             )
-            rare = self.options.slow_block_interval
             self._optional["advanced_power_control"] = OptionalBlock(
                 AdvancedPowerControl(
                     self._unit, base_offset=ADVANCED_POWER_CONTROL_ADDRESS
                 ),
                 timeout=slow,
-                interval=rare,
+                settings=True,
             )
             self._optional["advanced_power_control_2"] = OptionalBlock(
                 AdvancedPowerControl2(
                     self._unit, base_offset=ADVANCED_POWER_CONTROL_2_ADDRESS
                 ),
                 timeout=slow,
-                interval=rare,
+                settings=True,
             )
         if self.options.site_limit_control:
             self._optional["site_limit"] = OptionalBlock(
-                SiteLimit(self._unit, base_offset=SITE_LIMIT_ADDRESS)
+                SiteLimit(self._unit, base_offset=SITE_LIMIT_ADDRESS), settings=True
             )
             self._optional["ext_prod_max"] = OptionalBlock(
-                ExternalProductionMax(self._unit, base_offset=EXT_PROD_MAX_ADDRESS)
+                ExternalProductionMax(self._unit, base_offset=EXT_PROD_MAX_ADDRESS),
+                settings=True,
             )
         if self.options.storage_control:
             self._optional["storage_control"] = OptionalBlock(
-                StorageControl(self._unit, base_offset=STORAGE_CONTROL_ADDRESS)
+                StorageControl(self._unit, base_offset=STORAGE_CONTROL_ADDRESS),
+                settings=True,
             )
 
     async def async_add_batteries(self) -> None:
@@ -411,8 +398,34 @@ class SolarEdgeDevice:
 
     # -- polling ---------------------------------------------------------------
 
+    async def async_update_readings(self) -> UpdateReport:
+        """Refresh what this unit measures: the inverter, its meters, batteries."""
+        return await self._async_poll(UpdateReport(set(), {}), settings=False)
+
+    async def async_update_settings(self) -> UpdateReport:
+        """Refresh what this unit has been configured to do.
+
+        The control blocks change when an installer or this integration writes
+        them, not on their own, so a caller polls them rarely and again after a
+        write. ``global_power_control`` is not one of them: its two setpoints
+        share a four-register read with ``rrcr``, the ripple control receiver's
+        input, so the block goes with the measurements and its setpoints are
+        read back by :meth:`async_update_readings`.
+        """
+        return await self._async_poll(UpdateReport(set(), {}), settings=True)
+
     async def async_update(self) -> UpdateReport:
-        """Refresh this unit, and report what came back.
+        """Refresh measurements and settings together, in one report.
+
+        For a caller that does not want to schedule the two apart.
+        """
+        report = await self.async_update_readings()
+        return await self._async_poll(report, settings=True)
+
+    async def _async_poll(
+        self, report: UpdateReport, *, settings: bool
+    ) -> UpdateReport:
+        """Read one half of the unit, adding what happened to ``report``.
 
         Each logical device goes out as its own pooled set of reads and each
         optional block follows on its own, so neither a device that stops
@@ -420,17 +433,14 @@ class SolarEdgeDevice:
         what failed keeps its previous values and is named in the report.
         Listeners fire once everything has been tried, and only for what
         refreshed. A failure of the link itself raises instead of reporting,
-        and so does a unit that answers nothing at all.
-
-        A block whose interval has not elapsed is not read, and reports as
-        neither updated nor failed — the same as one the inverter refuses.
+        and so does a unit that has answered nothing at all this cycle — which
+        a report carrying the other half already has.
         """
         if self._polled is None:
             raise DeviceNotSetUp(f"ID {self.unit_id} was polled before setup")
-        updated: set[str] = set()
-        failed: dict[str, ModbusError] = {}
         fresh: list[ComponentGroup | Component] = []
-        for name, group in self._polled.items():
+        # The logical devices are all measurement; only blocks split both ways.
+        for name, group in ({} if settings else self._polled).items():
             try:
                 await group.async_update(notify=False)
             except ModbusConnectionError:
@@ -439,28 +449,28 @@ class SolarEdgeDevice:
                 # Nothing has answered yet, so this is the unit rather than one
                 # device on it — an inverter asleep behind a bridge that keeps
                 # the socket open. Walking the rest would pay a timeout each.
-                if not updated and not failed:
+                if not report.updated and not report.failed:
                     raise
                 _LOGGER.debug("I%s: %s did not refresh: %s", self.unit_id, name, err)
-                failed[name] = err
+                report.failed[name] = err
             except ModbusError as err:
                 _LOGGER.debug("I%s: %s did not refresh: %s", self.unit_id, name, err)
-                failed[name] = err
+                report.failed[name] = err
             else:
-                updated.add(name)
+                report.updated.add(name)
                 fresh.append(group)
         for name, block in self._optional.items():
-            if not block.due:
+            if block.settings is not settings:
                 continue
             error = await self._poll_optional(name, block)
             if error is not None:
-                failed[name] = error
+                report.failed[name] = error
             elif block.supported:
-                updated.add(name)
+                report.updated.add(name)
                 fresh.append(block.component)
         for component in fresh:
             component.notify()
-        return UpdateReport(updated, failed)
+        return report
 
     async def _poll_optional(
         self, name: str, block: OptionalBlock
@@ -500,7 +510,6 @@ class SolarEdgeDevice:
         else:
             block.supported = True
             block.timed_out = False
-            block.last_read = time.monotonic()
             return None
 
     async def async_read_raw(self) -> dict[str, dict[int, int | bool]]:
@@ -531,17 +540,6 @@ class SolarEdgeDevice:
         return {space: dict(sorted(values.items())) for space, values in raw.items()}
 
     # -- optional block access -------------------------------------------------
-
-    def mark_due(self, component: Component) -> None:
-        """Have the next poll re-read the block a component belongs to.
-
-        A block on its own interval would otherwise show the value it had
-        before a write for the rest of that interval.
-        """
-        for block in self._optional.values():
-            if block.component is component:
-                block.mark_due()
-                return
 
     def block(self, name: str) -> Component | None:
         """Return an optional block's component, or ``None`` if it is absent."""

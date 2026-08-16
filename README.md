@@ -27,7 +27,29 @@ discovery and may not be supported by SolarEdge.
 - Informational sensor for device and its attributes
 - Supports status and error reporting sensors.
 - Contains a failing device so it cannot take the rest of the poll with it.
+- Reads the control blocks apart from the measurements, on their own schedule.
 - User friendly: Config Flow, Options, Repair Issues, and Reconfiguration.
+
+### Controls are polled apart from measurements
+
+What the inverter measures and what it has been configured to do refresh on
+separate schedules. The site limit, storage control and advanced power control
+blocks hold settings: they change when an installer or this integration writes
+them, not on their own. With every control option enabled they are 190 of the
+775 registers a full poll reads, in 5 of its 15 requests — including the two
+grid-profile blocks that some inverters take several seconds each to answer.
+
+They are now read every 10 minutes rather than every scan interval, and again
+straight after a control entity writes one, so the entity shows what the
+inverter took rather than what it was asked for. Nothing about the measurement
+poll changes: it keeps the polling frequency you configured, and it is still
+the poll that decides whether the link is healthy.
+
+One control block is deliberately not in that half. The global power control
+block returns the active power limit and the fixed power factor in the same
+four-register read as `RRCR`, the ripple control receiver's input, which the
+grid operator moves rather than us — so all four are read with the
+measurements, and those two setpoints refresh at the measurement rate.
 
 ### Partial updates
 

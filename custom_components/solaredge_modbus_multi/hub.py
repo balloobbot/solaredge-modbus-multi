@@ -34,7 +34,6 @@ from modbus_connection.model import Component
 from modbus_connection.model.sunspec import SunSpecMapShiftError
 
 from .const import (
-    ADV_PWR_CONTROL_INTERVAL,
     DETECT_EVSE_REGEX,
     DOMAIN,
     STATUS_VENDOR4_VERSION,
@@ -193,7 +192,6 @@ class SolarEdgeModbusMultiHub:
             storage_control=self._adv_storage_control,
             site_limit_control=self._adv_site_limit_control,
             slow_block_timeout=SolarEdgeTimeouts.Read / 1000,
-            slow_block_interval=ADV_PWR_CONTROL_INTERVAL,
         )
 
     async def _async_init_solaredge(self) -> None:
@@ -395,7 +393,7 @@ class SolarEdgeModbusMultiHub:
         reports: list[UpdateReport] = []
         for device in (*self.inverters, *self.evses):
             try:
-                reports.append(await device.async_update())
+                reports.append(await device.async_update_readings())
             except ModbusTimeoutError:
                 # A unit that answered nothing at all. While nothing else has
                 # answered either that is the link, and the units after it
@@ -412,6 +410,35 @@ class SolarEdgeModbusMultiHub:
             return
         raise DataUpdateFailed(f"Nothing answered: {errors[0]}") from ExceptionGroup(
             "every device failed", errors
+        )
+
+    async def async_refresh_settings(self) -> None:
+        """Read every inverter's control blocks.
+
+        They hold what the inverter has been configured to do, which changes
+        only when an installer or this integration writes it, so they run on
+        their own slow schedule. The link's health is the measurement poll's to
+        judge: this one neither counts timeouts nor drops a stuck link.
+        """
+        if not self.initalized:
+            return
+
+        reports = [
+            await inverter.async_update_settings() for inverter in self.inverters
+        ]
+
+        # Honouring the option, not judging the link: a measurement poll this
+        # lands in the middle of simply reconnects on its next request.
+        if not self.keep_modbus_open and not self.has_write:
+            await self.disconnect()
+
+        if any(report.updated for report in reports):
+            return
+        errors = [err for report in reports for err in report.failed.values()]
+        if not errors:
+            return
+        raise DataUpdateFailed(f"Nothing answered: {errors[0]}") from ExceptionGroup(
+            "every control block failed", errors
         )
 
     def _raise_issues_for_slow_blocks(self) -> None:
@@ -657,25 +684,35 @@ class SolarEdgeInverter:
                 for index in range(int(device.mppt.n or 0))
             ]
 
-    async def async_update(self) -> UpdateReport:
-        """Refresh this inverter and everything behind it."""
+    async def async_update_readings(self) -> UpdateReport:
+        """Refresh what this inverter and everything behind it measures."""
         try:
-            self.report = await self.device.async_update()
+            self.report = await self.device.async_update_readings()
         except ModbusTimeoutError:
             # No report at all, so the last one must stop standing in for it.
             self._silent = True
             raise
         self._silent = False
-        for name in sorted(self.report.failed.keys() - self._failed):
+        self._warn_about_failures(self.report)
+        self._resize_mmppt_units()
+        return self.report
+
+    async def async_update_settings(self) -> UpdateReport:
+        """Refresh this inverter's control blocks."""
+        report = await self.device.async_update_settings()
+        self._warn_about_failures(report)
+        return report
+
+    def _warn_about_failures(self, report: UpdateReport) -> None:
+        """Log what a poll newly failed to read, once rather than every cycle."""
+        for name in sorted(report.failed.keys() - self._failed):
             _LOGGER.warning(
                 "Failed to fetch I%s %s: %s",
                 self.inverter_unit_id,
                 name,
-                self.report.failed[name],
+                report.failed[name],
             )
-        self._failed = frozenset(self.report.failed)
-        self._resize_mmppt_units()
-        return self.report
+        self._failed = (self._failed - report.updated) | frozenset(report.failed)
 
     def refreshed(self, name: str) -> bool:
         """Whether the last poll refreshed one of the devices behind this unit.
@@ -712,9 +749,6 @@ class SolarEdgeInverter:
             raise HomeAssistantError(
                 f"Inverter ID {self.inverter_unit_id} does not serve {field}."
             )
-        # Before the write: a write that fails still has to be read back, since
-        # the entity would otherwise keep showing the value it asked for.
-        self.device.mark_due(component)
         await self.hub.async_write(component, field, value)
 
     @property
@@ -1023,10 +1057,10 @@ class SolarEdgeEVSE:
         self.uid_base = f"{self.model}_{self.serial}"
         self._answered = True
 
-    async def async_update(self) -> UpdateReport:
+    async def async_update_readings(self) -> UpdateReport:
         """Refresh the identity block, which is where the firmware version is."""
         try:
-            report = await self.device.async_update()
+            report = await self.device.async_update_readings()
         except ModbusTimeoutError:
             self._answered = False
             raise

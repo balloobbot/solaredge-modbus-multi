@@ -36,7 +36,7 @@ from solaredge_modbus_multi.solaredge import (  # noqa: E402
     SolarEdgeOptions,
 )
 
-from .fixtures import seed_battery, seed_inverter, seed_meter  # noqa: E402
+from .fixtures import reads_at, seed_battery, seed_inverter, seed_meter  # noqa: E402
 
 ENTRY_ID = "test_entry"
 
@@ -118,7 +118,8 @@ async def _build_hub(unit, **options) -> StubHub:
     # Polled through the wrapper, and after it is built, exactly as the hub
     # does it: the report the wrapper keeps is what the entities read.
     inverter = SolarEdgeInverter(1, hub, device)
-    await inverter.async_update()
+    await inverter.async_update_readings()
+    await inverter.async_update_settings()
     hub.inverters.append(inverter)
     for meter in device.meters:
         hub.meters.append(SolarEdgeMeter(hub, inverter, meter))
@@ -130,7 +131,15 @@ async def _build_hub(unit, **options) -> StubHub:
 async def _entities_for(hub, *modules):
     """Run each platform's setup and collect the entities it created."""
     hass = type("Hass", (), {})()
-    hass.data = {DOMAIN: {ENTRY_ID: {"hub": hub, "coordinator": StubCoordinator()}}}
+    hass.data = {
+        DOMAIN: {
+            ENTRY_ID: {
+                "hub": hub,
+                "coordinator": StubCoordinator(),
+                "settings_coordinator": StubCoordinator(),
+            }
+        }
+    }
 
     created = []
     for module in modules:
@@ -289,7 +298,15 @@ async def test_diagnostics_carry_decoded_values_and_raw_registers(
 
     hub = await _build_hub(mock_modbus_unit, detect_meters=True, detect_batteries=True)
     hass = type("Hass", (), {})()
-    hass.data = {DOMAIN: {ENTRY_ID: {"hub": hub, "coordinator": StubCoordinator()}}}
+    hass.data = {
+        DOMAIN: {
+            ENTRY_ID: {
+                "hub": hub,
+                "coordinator": StubCoordinator(),
+                "settings_coordinator": StubCoordinator(),
+            }
+        }
+    }
 
     entry = StubConfigEntry()
     entry.as_dict = lambda: {"entry_id": ENTRY_ID, "data": {"host": "192.0.2.10"}}
@@ -392,7 +409,7 @@ async def test_a_failed_meter_takes_only_its_own_entities_unavailable(
     assert all(before[e.unique_id] for e in meter_entities)
 
     mock_modbus_unit.fail_read(40121, ModbusTimeoutError("slow meter"))
-    await hub.inverters[0].async_update()
+    await hub.inverters[0].async_update_readings()
 
     after = {e.unique_id: e.available for e in entities}
     lost = {uid for uid, was in before.items() if was and not after[uid]}
@@ -468,7 +485,7 @@ async def test_a_total_holds_its_last_value_when_a_good_poll_gates_it(
 
     mock_modbus_unit.holding[40093] = u32(9_000)  # inverter WH, gone backwards
     mock_modbus_unit.holding[57718] = u64(0, little=True)  # battery in standby
-    await hub.inverters[0].async_update()
+    await hub.inverters[0].async_update_readings()
     _process_totals(entities)
 
     assert lifetime.available and lifetime.native_value == 12345678
@@ -503,37 +520,38 @@ async def test_an_accepted_battery_reset_publishes_the_new_total(
     assert export.native_value == 4_000_000
 
     mock_modbus_unit.holding[57718] = u64(1_000, little=True)  # a new battery
-    await hub.inverters[0].async_update()
+    await hub.inverters[0].async_update_readings()
     _process_totals(entities)
     assert export.native_value == 4_000_000  # one cycle short of a reset
 
-    await hub.inverters[0].async_update()
+    await hub.inverters[0].async_update_readings()
     _process_totals(entities)
     assert export.native_value == 1_000
 
 
-async def test_writing_a_control_re_reads_its_block_on_the_next_poll(
+async def test_a_control_follows_the_poll_that_reads_its_block(
     mock_modbus_unit,
 ) -> None:
     seed_inverter(mock_modbus_unit)
-    hub = await _build_hub(
-        mock_modbus_unit, detect_extras=True, slow_block_interval=600
-    )
+    hub = await _build_hub(mock_modbus_unit, detect_extras=True)
     entities = await _entities_for(hub, number)
     uid = hub.inverters[0].uid_base
     reduce = next(e for e in entities if e.unique_id == f"{uid}_power_reduce")
+    limit = next(e for e in entities if e.unique_id == f"{uid}_active_power_limit_set")
 
-    # Without the write the block would sit out this poll; the write puts it
-    # back in, so the entity shows what the inverter took rather than what it
-    # was asked for.
-    mark = len(mock_modbus_unit.read_events)
+    # A grid profile setting rides the settings coordinator, which is what the
+    # entity asks to refresh after a write. The active power limit shares its
+    # four registers with the ripple control receiver, so it rides the other.
+    assert reduce.coordinator is not limit.coordinator
+
+    # The measurement poll leaves the grid profile alone; the settings poll
+    # reads it back, so the entity shows what the inverter took rather than
+    # what it was asked for.
     await hub.inverters[0].async_write(reduce.block, reduce._field, 55.0)
-    await hub.inverters[0].async_update()
+    mark = len(mock_modbus_unit.read_events)
+    await hub.inverters[0].async_update_readings()
+    assert reads_at(mock_modbus_unit, 61696, since=mark) == 0
 
-    covered = [
-        event
-        for event in mock_modbus_unit.read_events[mark:]
-        if event.address <= 61696 < event.address + event.count
-    ]
-    assert len(covered) == 1
+    await hub.inverters[0].async_update_settings()
+    assert reads_at(mock_modbus_unit, 61696, since=mark) == 1
     assert reduce.native_value == pytest.approx(55.0)

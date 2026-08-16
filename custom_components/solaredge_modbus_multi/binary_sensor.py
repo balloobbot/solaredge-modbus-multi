@@ -26,6 +26,7 @@ async def async_setup_entry(
 ) -> None:
     hub = hass.data[DOMAIN][config_entry.entry_id]["hub"]
     coordinator = hass.data[DOMAIN][config_entry.entry_id]["coordinator"]
+    settings = hass.data[DOMAIN][config_entry.entry_id]["settings_coordinator"]
 
     entities = []
 
@@ -33,7 +34,7 @@ async def async_setup_entry(
         if hub.option_detect_extras and inverter.device.has_block(
             "advanced_power_control"
         ):
-            entities.append(AdvPowerControlEnabled(inverter, config_entry, coordinator))
+            entities.append(AdvPowerControlEnabled(inverter, config_entry, settings))
 
         entities.append(GridStatusOnOff(inverter, config_entry, coordinator))
 

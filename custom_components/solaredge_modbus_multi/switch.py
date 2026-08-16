@@ -23,7 +23,9 @@ async def async_setup_entry(
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     hub = hass.data[DOMAIN][config_entry.entry_id]["hub"]
-    coordinator = hass.data[DOMAIN][config_entry.entry_id]["coordinator"]
+    # Every switch here is over a control block, so they all follow the poll
+    # that reads those.
+    settings = hass.data[DOMAIN][config_entry.entry_id]["settings_coordinator"]
 
     entities = []
 
@@ -31,16 +33,16 @@ async def async_setup_entry(
     for inverter in hub.inverters:
         if hub.option_site_limit_control is True:
             entities.append(
-                SolarEdgeExternalProduction(inverter, config_entry, coordinator)
+                SolarEdgeExternalProduction(inverter, config_entry, settings)
             )
             entities.append(
-                SolarEdgeNegativeSiteLimit(inverter, config_entry, coordinator)
+                SolarEdgeNegativeSiteLimit(inverter, config_entry, settings)
             )
 
         if hub.option_detect_extras and inverter.device.has_block(
             "advanced_power_control"
         ):
-            entities.append(SolarEdgeGridControl(inverter, config_entry, coordinator))
+            entities.append(SolarEdgeGridControl(inverter, config_entry, settings))
 
     if entities:
         async_add_entities(entities)
